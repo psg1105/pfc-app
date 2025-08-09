@@ -1,4 +1,4 @@
-
-# 여기에 앞서 캔버스에 작성한 전체 PFC Streamlit v0 코드 붙여넣기
-# (실제 배포 시, 캔버스 내용 그대로 사용)
-
+import streamlit as st
+st.set_page_config(page_title="PFC test", layout="wide")
+st.title("It works! ✅")
+st.write("배포/패키지 정상. 이제 v0 코드로 교체하세요.")
