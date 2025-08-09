@@ -5,17 +5,15 @@ import matplotlib.pyplot as plt
 import sqlite3
 from datetime import datetime
 import io
-import os
 
 # ---------------------- 기본 설정 ----------------------
 st.set_page_config(page_title="PFC App v1", layout="wide")
 st.title("📊 Personal Finance Checkup (v1)")
 
-# 한글 폰트/마이너스
 plt.rcParams["font.family"] = ["AppleGothic","Malgun Gothic","NanumGothic","DejaVu Sans","Arial","sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
-DB_PATH = "pfc.db"  # SQLite 파일
+DB_PATH = "pfc.db"
 
 DEFAULT_COLORS_SUMMARY = {"Income":"#4E79A7","Expense":"#E15759","Remaining Balance":"#59A14F","Etc":"#9AA0A6"}
 DEFAULT_COLORS_ASSETS  = {"Stock":"#4E79A7","Mutual Fund":"#59A14F","Real Estate":"#F28E2B","Savings":"#76B7B2",
@@ -100,38 +98,49 @@ def list_clients():
 
 def get_client(client_id):
     with get_conn() as con:
-        cur = con.cursor()
-        row = cur.execute("SELECT id,name,phone,email,home_address,notes FROM clients WHERE id=?",(client_id,)).fetchone()
+        row = con.execute(
+            "SELECT id,name,phone,email,home_address,notes FROM clients WHERE id=?",
+            (client_id,)
+        ).fetchone()
         return row
 
-def upsert_client(client_id, name, phone, email, home_address, notes):
+def insert_client(name, phone, email, home_address, notes):
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as con:
         cur = con.cursor()
-        if client_id:
-            cur.execute("""UPDATE clients SET name=?, phone=?, email=?, home_address=?, notes=?, updated_at=?
-                           WHERE id=?""", (name, phone, email, home_address, notes, now, client_id))
-        else:
-            cur.execute("""INSERT INTO clients(name,phone,email,home_address,notes,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?)""", (name, phone, email, home_address, notes, now, now))
-            client_id = cur.lastrowid
-            # 기본 설정 레코드 생성
-            cur.execute("INSERT OR IGNORE INTO client_settings(client_id, etc_amount, use_income_details) VALUES(?,?,?)",
-                        (client_id, 0, 1))
+        cur.execute("""INSERT INTO clients(name,phone,email,home_address,notes,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (name, phone, email, home_address, notes, now, now))
+        new_id = cur.lastrowid
+        cur.execute("INSERT OR IGNORE INTO client_settings(client_id, etc_amount, use_income_details) VALUES(?,?,?)",
+                    (new_id, 0, 1))
         con.commit()
-    return client_id
+        return new_id
+
+def update_client(client_id, name, phone, email, home_address, notes):
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as con:
+        con.execute("""UPDATE clients
+                       SET name=?, phone=?, email=?, home_address=?, notes=?, updated_at=?
+                       WHERE id=?""",
+                    (name, phone, email, home_address, notes, now, client_id))
+        con.commit()
 
 def get_settings(client_id):
     with get_conn() as con:
-        row = con.execute("SELECT etc_amount, use_income_details FROM client_settings WHERE client_id=?",(client_id,)).fetchone()
-        if row is None:
-            return 0.0, 1
-        return float(row[0]), int(row[1])
+        row = con.execute(
+            "SELECT etc_amount, use_income_details FROM client_settings WHERE client_id=?",
+            (client_id,)
+        ).fetchone()
+        return (float(row[0]), int(row[1])) if row else (0.0, 1)
 
 def update_settings(client_id, etc_amount, use_income_details):
     with get_conn() as con:
-        con.execute("INSERT INTO client_settings(client_id,etc_amount,use_income_details) VALUES(?,?,?) ON CONFLICT(client_id) DO UPDATE SET etc_amount=?, use_income_details=?",
-                    (client_id, etc_amount, use_income_details, etc_amount, use_income_details))
+        con.execute("""
+            INSERT INTO client_settings(client_id,etc_amount,use_income_details)
+            VALUES(?,?,?)
+            ON CONFLICT(client_id) DO UPDATE SET etc_amount=?, use_income_details=?
+        """, (client_id, etc_amount, use_income_details, etc_amount, use_income_details))
         con.commit()
 
 def df_query(sql, client_id):
@@ -167,17 +176,13 @@ def init_state():
 init_state()
 init_db()
 
-# ---------------------- 유틸 ----------------------
+# ---------------------- 유틸(요약/차트/포커스) ----------------------
 def compute_summary(client_id):
     if not client_id:
         return pd.DataFrame({"Category":["Income","Expense","Remaining Balance","Etc"], "Amount":[0,0,0,0]})
-    inc = df_query("SELECT amount FROM incomes WHERE client_id=?", client_id)["amount"].sum() if client_id else 0
-    exp = df_query("SELECT amount FROM expenses WHERE client_id=?", client_id)["amount"].sum() if client_id else 0
-    etc_amount, use_inc = get_settings(client_id)
-    if use_inc==0:
-        # 수동 Income 사용: client_settings.etc_amount는 그대로, Income은 clients 테이블에 따로 저장하지 않았으므로
-        # v1에서는 자동합산만 사용하고, 수동 Income은 추후 확장. (요청 시 추가)
-        pass
+    inc = df_query("SELECT amount FROM incomes WHERE client_id=?", client_id)["amount"].sum()
+    exp = df_query("SELECT amount FROM expenses WHERE client_id=?", client_id)["amount"].sum()
+    etc_amount, _use_inc = get_settings(client_id)
     remain = max(inc-exp, 0)
     return pd.DataFrame({"Category":["Income","Expense","Remaining Balance","Etc"],
                          "Amount":[inc, exp, remain, etc_amount]})
@@ -237,11 +242,10 @@ def focus_field_by_label(label_text: str):
           if (els && els.length) {{ els[0].focus(); els[0].select(); }}
         }}, 80);
         </script>
-        """,
-        height=0,
+        """, height=0
     )
 
-# ---------------------- Sidebar (스타일 공통) ----------------------
+# ---------------------- Sidebar (그래프 스타일) ----------------------
 with st.sidebar:
     st.markdown("### ⚙️ 그래프 스타일")
     st.session_state["fig_size"] = st.slider("그래프 크기(인치)", 3.0, 8.0, st.session_state["fig_size"], 0.5)
@@ -252,54 +256,76 @@ with st.sidebar:
     st.session_state["pct_distance"] = st.slider("퍼센트 위치(중심↔테두리)", 0.55, 0.85, st.session_state["pct_distance"], 0.01)
     st.session_state["list_top_n"] = st.slider("우측 리스트 항목 수", 5, 20, st.session_state["list_top_n"], 1)
 
-# ---------------------- 상단 요약 Sticky ----------------------
+# ---------------------- Sticky Summary 스타일 ----------------------
 st.markdown("""
 <style>
-.sticky-summary {position: sticky; top: 0; z-index: 999; background-color: var(--background-color); padding-top: 0.5rem; padding-bottom:0.5rem;}
+.sticky-summary {position: sticky; top: 0; z-index: 999;
+ background-color: var(--background-color); padding-top: .5rem; padding-bottom:.5rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------- 클라이언트 관리 ----------------------
+# ---------------------- 👥 클라이언트 관리 ----------------------
 st.markdown("## 👥 클라이언트 선택 / 관리")
+tab_list, tab_new, tab_edit = st.tabs(["리스트/선택","신규 등록","프로필 수정"])
 
-clients_df = list_clients()
-left, right = st.columns([2,3], gap="large")
-
-with left:
+with tab_list:
+    st.markdown("#### 등록된 클라이언트")
+    clients_df = list_clients()
     if clients_df.empty:
-        st.info("등록된 클라이언트가 없습니다. 오른쪽에서 추가하세요.")
+        st.info("등록된 클라이언트가 없습니다. '신규 등록' 탭에서 추가하세요.")
     else:
-        names = [f'{r["name"]} — {r["email"] or ""} {("(" + r["phone"] + ")") if r["phone"] else ""}' for _,r in clients_df.iterrows()]
-        ids   = clients_df["id"].tolist()
-        idx = st.selectbox("클라이언트 선택", options=list(range(len(ids))), format_func=lambda i: names[i] if names else "", index=0 if st.session_state.current_client_id is None else max(0, ids.index(st.session_state.current_client_id)) if st.session_state.current_client_id in ids else 0)
+        st.dataframe(clients_df, use_container_width=True, height=250)
+        ids = clients_df["id"].tolist()
+        labels = [f'{r["name"]} — {r["email"] or ""} ({r["phone"] or ""})' for _,r in clients_df.iterrows()]
+        idx = st.selectbox("클라이언트 선택", options=list(range(len(ids))),
+                           format_func=lambda i: labels[i], index=0 if st.session_state.current_client_id not in ids else ids.index(st.session_state.current_client_id))
         st.session_state.current_client_id = ids[idx]
+        st.success("선택되었습니다. 아래에서 입력을 진행하세요.")
 
-with right:
-    st.markdown("### 신규/수정")
-    cid = st.session_state.current_client_id
-    name, phone, email, home_address, notes = ("","","","","")
-    if cid:
-        row = get_client(cid)
-        if row:
-            _, name, phone, email, home_address, notes = row
-    with st.form("client_form"):
+with tab_new:
+    st.markdown("#### 새 클라이언트 등록")
+    with st.form("form_new_client", clear_on_submit=True):
         c1,c2 = st.columns(2)
-        with c1: name = st.text_input("Client Name*", value=name)
-        with c2: phone = st.text_input("Phone", value=phone)
-        email = st.text_input("Email", value=email)
-        home_address = st.text_input("Home address", value=home_address)
-        notes = st.text_area("Notes", value=notes, height=80)
-        submitted = st.form_submit_button("저장/업데이트")
-    if submitted:
+        with c1: name = st.text_input("Client Name*")
+        with c2: phone = st.text_input("Phone")
+        email = st.text_input("Email")
+        home_address = st.text_input("Home address")
+        notes = st.text_area("Notes", height=80)
+        submit_new = st.form_submit_button("등록")
+    if submit_new:
         if not name.strip():
             st.warning("이름은 필수입니다.")
         else:
-            new_id = upsert_client(cid, name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
+            new_id = insert_client(name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
             st.session_state.current_client_id = new_id
-            st.success("저장 완료!")
+            st.success("등록 완료! 리스트/선택 탭에서 확인되며, 입력 탭이 활성화됩니다.")
             st.rerun()
 
-# 선택된 클라이언트가 있어야 하위 UI 표시
+with tab_edit:
+    st.markdown("#### 선택된 클라이언트 프로필 수정")
+    cid = st.session_state.current_client_id
+    if not cid:
+        st.info("왼쪽 '리스트/선택'에서 클라이언트를 먼저 선택하세요.")
+    else:
+        row = get_client(cid)
+        _, name0, phone0, email0, addr0, notes0 = row if row else (None,"","","","","")
+        with st.form("form_edit_client"):
+            c1,c2 = st.columns(2)
+            with c1: name = st.text_input("Client Name*", value=name0 or "")
+            with c2: phone = st.text_input("Phone", value=phone0 or "")
+            email = st.text_input("Email", value=email0 or "")
+            home_address = st.text_input("Home address", value=addr0 or "")
+            notes = st.text_area("Notes", value=notes0 or "", height=80)
+            submit_edit = st.form_submit_button("저장/업데이트")
+        if submit_edit:
+            if not name.strip():
+                st.warning("이름은 필수입니다.")
+            else:
+                update_client(cid, name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
+                st.success("프로필 저장 완료!")
+                st.rerun()
+
+# ---------------------- 선택된 클라이언트 체크 ----------------------
 client_id = st.session_state.current_client_id
 if not client_id:
     st.stop()
@@ -323,8 +349,8 @@ with tab_inc:
     st.subheader("수입 항목 추가")
     with st.form("form_add_income", clear_on_submit=True):
         a,b,c = st.columns([1.2,2,1])
-        with a: in_cat  = st.text_input("Category (Income)", value="")
-        with b: in_desc = st.text_input("Description (Income)", value="")
+        with a: in_cat  = st.text_input("Category (Income)")
+        with b: in_desc = st.text_input("Description (Income)")
         with c: in_amt  = st.number_input("Amount (Income)", min_value=0.0, step=10.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
@@ -349,8 +375,8 @@ with tab_exp:
     st.subheader("지출 항목 추가")
     with st.form("form_add_expense", clear_on_submit=True):
         a,b,c = st.columns([1.2,2,1])
-        with a: exp_cat  = st.text_input("Category (Expense)", value="")
-        with b: exp_desc = st.text_input("Description (Expense)", value="")
+        with a: exp_cat  = st.text_input("Category (Expense)")
+        with b: exp_desc = st.text_input("Description (Expense)")
         with c: exp_amt  = st.number_input("Amount (Expense)", min_value=0.0, step=10.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
@@ -375,7 +401,7 @@ with tab_ast:
     st.subheader("자산 항목 추가")
     with st.form("form_add_asset", clear_on_submit=True):
         a1,a2 = st.columns([2,1])
-        with a1: ast_cat = st.text_input("Category (Assets)", value="")
+        with a1: ast_cat = st.text_input("Category (Assets)")
         with a2: ast_amt = st.number_input("Amount (Assets)", min_value=0.0, step=100.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
@@ -396,7 +422,7 @@ with tab_liab:
     st.subheader("부채 항목 추가")
     with st.form("form_add_liab", clear_on_submit=True):
         l1,l2 = st.columns([2,1])
-        with l1: li_cat = st.text_input("Category (Liabilities)", value="")
+        with l1: li_cat = st.text_input("Category (Liabilities)")
         with l2: li_amt = st.number_input("Amount (Liabilities)", min_value=0.0, step=100.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
@@ -416,11 +442,8 @@ with tab_liab:
 with tab_sum:
     st.subheader("Summary (보기/설정)")
     etc_amount, use_income_details = get_settings(client_id)
-
-    # 메트릭
     metrics_block(compute_summary(client_id))
     st.divider()
-
     use_income_details = st.checkbox("Income을 'Income Details' 합계로 사용", value=bool(use_income_details))
     etc_amount = st.number_input("Etc 금액", min_value=0.0, step=50.0, value=float(etc_amount))
     if st.button("설정 저장"):
@@ -431,13 +454,9 @@ with tab_sum:
 # ---------------------- 시각화 ----------------------
 st.markdown("---")
 st.header("📈 시각화")
-# 1) INCOME / EXPENSE 파이
-df_sum_calc = compute_summary(client_id)
-draw_pie_with_list(df_sum_calc, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
-# 2) ASSET
+draw_pie_with_list(compute_summary(client_id), "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
 draw_pie_with_list(df_query("SELECT category as Category, amount as Amount FROM assets WHERE client_id=?", client_id),
                    "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
-# 3) LIABILITY
 draw_pie_with_list(df_query("SELECT category as Category, amount as Amount FROM liabilities WHERE client_id=?", client_id),
                    "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
 
