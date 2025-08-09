@@ -108,8 +108,8 @@ def compute_summary(df_summary: pd.DataFrame,
         exp_total = pd.to_numeric(df_expense["Amount"], errors="coerce").fillna(0).sum()
 
     # Income 합계 (상세 사용 여부)
-    if use_income_details and (not st.session_state.df_income.empty):
-        inc_total = pd.to_numeric(st.session_state.df_income["Amount"], errors="coerce").fillna(0).sum()
+    if use_income_details and (not df_income.empty):
+        inc_total = pd.to_numeric(df_income["Amount"], errors="coerce").fillna(0).sum()
         df.loc[df["Category"] == "Income", "Amount"] = inc_total
     else:
         df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
@@ -233,13 +233,11 @@ with st.expander("📂 파일 불러오기 / 저장", expanded=False):
     def make_excel_bytes() -> bytes:
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as writer:
-            # 계산 반영 Summary
             calc = compute_summary(st.session_state.df_summary,
                                    st.session_state.df_expense,
                                    st.session_state.df_income,
                                    st.session_state.use_income_details)
             calc.to_excel(writer, index=False, sheet_name="Summary")
-            # 상세 시트들
             st.session_state.df_income.to_excel(writer, index=False, sheet_name="IncomeDetails")
             st.session_state.df_expense.to_excel(writer, index=False, sheet_name="ExpenseDetails")
             st.session_state.df_assets.to_excel(writer, index=False, sheet_name="Assets")
@@ -263,24 +261,25 @@ tab_inc, tab_exp, tab_sum, tab_ast, tab_liab = st.tabs(
     ["Income 입력", "Expense 입력", "Summary(보기/설정)", "Assets", "Liabilities"]
 )
 
-# --- Income 입력(신규) ---
+# --- Income 입력: 폼 사용 (Enter 제출 + 자동 초기화) ---
 with tab_inc:
     st.subheader("수입 항목 추가")
-    s1, s2, s3 = st.columns([1.2, 2, 1])
-    with s1:
-        in_cat = st.text_input("Category", value="", key="in_income_cat")
-    with s2:
-        in_desc = st.text_input("Description", value="", key="in_income_desc")
-    with s3:
-        in_amt = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0, key="in_income_amt")
-
-    if st.button("추가", key="btn_add_income"):
-        if not in_desc and not in_cat and in_amt == 0:
-            st.warning("최소한 Category 또는 Description, Amount를 입력해주세요.")
-        else:
-            new_row = {"Category": in_cat, "Description": in_desc, "Amount": in_amt}
+    with st.form("form_add_income", clear_on_submit=True):
+        s1, s2, s3 = st.columns([1.2, 2, 1])
+        with s1:
+            in_cat = st.text_input("Category", value="")
+        with s2:
+            in_desc = st.text_input("Description", value="")
+        with s3:
+            in_amt = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0)
+        submitted_inc = st.form_submit_button("추가")
+    if submitted_inc:
+        # 아무 것도 없더라도 오류 없이 통과 (빈 입력은 추가 안 함)
+        if (in_cat or in_desc) or (in_amt > 0):
             st.session_state.df_income = pd.concat(
-                [st.session_state.df_income, pd.DataFrame([new_row])], ignore_index=True
+                [st.session_state.df_income,
+                 pd.DataFrame([{"Category": in_cat, "Description": in_desc, "Amount": in_amt}])],
+                ignore_index=True
             )
             st.success("추가 완료!")
 
@@ -292,7 +291,6 @@ with tab_inc:
         df_show.index = range(1, len(df_show) + 1)
         del_idx = st.multiselect("삭제할 행 선택 (번호)", options=list(df_show.index), key="ms_del_inc")
         st.dataframe(df_show, use_container_width=True, key="df_income_table")
-
         if st.button("선택 행 삭제", key="btn_del_inc"):
             if del_idx:
                 real_idx = [i-1 for i in del_idx]
@@ -301,24 +299,23 @@ with tab_inc:
             else:
                 st.info("선택한 행이 없습니다.")
 
-# --- Expense 입력 ---
+# --- Expense 입력: 폼 사용 (Enter 제출 + 자동 초기화) ---
 with tab_exp:
     st.subheader("지출 항목 추가")
-    c1, c2, c3 = st.columns([1.2, 2, 1])
-    with c1:
-        exp_cat = st.text_input("Category", value="", key="in_exp_cat")
-    with c2:
-        exp_desc = st.text_input("Description", value="", key="in_exp_desc")
-    with c3:
-        exp_amt = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0, key="in_exp_amt")
-
-    if st.button("추가", key="btn_add_exp"):
-        if not exp_desc and not exp_cat and exp_amt == 0:
-            st.warning("최소한 Category 또는 Description, Amount를 입력해주세요.")
-        else:
-            new_row = {"Category": exp_cat, "Description": exp_desc, "Amount": exp_amt}
+    with st.form("form_add_expense", clear_on_submit=True):
+        c1, c2, c3 = st.columns([1.2, 2, 1])
+        with c1:
+            exp_cat = st.text_input("Category", value="")
+        with c2:
+            exp_desc = st.text_input("Description", value="")
+        with c3:
+            exp_amt = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0)
+        submitted_exp = st.form_submit_button("추가")
+    if submitted_exp:
+        if (exp_cat or exp_desc) or (exp_amt > 0):
             st.session_state.df_expense = pd.concat(
-                [st.session_state.df_expense, pd.DataFrame([new_row])],
+                [st.session_state.df_expense,
+                 pd.DataFrame([{"Category": exp_cat, "Description": exp_desc, "Amount": exp_amt}])],
                 ignore_index=True
             )
             st.success("추가 완료!")
@@ -331,7 +328,6 @@ with tab_exp:
         df_show.index = range(1, len(df_show) + 1)
         del_idx = st.multiselect("삭제할 행 선택 (번호)", options=list(df_show.index), key="ms_del_exp")
         st.dataframe(df_show, use_container_width=True, key="df_exp_table")
-
         if st.button("선택 행 삭제", key="btn_del_exp"):
             if del_idx:
                 real_idx = [i-1 for i in del_idx]
@@ -340,14 +336,13 @@ with tab_exp:
             else:
                 st.info("선택한 행이 없습니다.")
 
-# --- Summary 보기/설정 (표 대신 계산값 표시) ---
+# --- Summary 보기/설정 ---
 with tab_sum:
     st.subheader("Summary (자동 집계)")
     st.checkbox("Income을 'Income Details' 합계로 사용", value=st.session_state.use_income_details,
                 key="chk_use_inc_details")
     st.session_state.use_income_details = st.session_state.chk_use_inc_details
 
-    # Income 수동 입력(상세 합계 미사용 시)
     if not st.session_state.use_income_details:
         cur_inc = float(st.session_state.df_summary.loc[
             st.session_state.df_summary["Category"] == "Income", "Amount"
@@ -356,14 +351,12 @@ with tab_sum:
         st.session_state.df_summary.loc[st.session_state.df_summary["Category"] == "Income", "Amount"] = new_inc
         st.caption("※ 'Income Details'를 사용하지 않을 때만 적용됩니다.")
 
-    # Etc 수동 입력
     cur_etc = float(st.session_state.df_summary.loc[
         st.session_state.df_summary["Category"] == "Etc", "Amount"
     ].sum())
     new_etc = st.number_input("Etc 금액", min_value=0.0, step=50.0, value=cur_etc, key="ni_manual_etc")
     st.session_state.df_summary.loc[st.session_state.df_summary["Category"] == "Etc", "Amount"] = new_etc
 
-    # 계산 결과 표시
     calc = compute_summary(st.session_state.df_summary,
                            st.session_state.df_expense,
                            st.session_state.df_income,
