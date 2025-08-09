@@ -4,19 +4,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 
-# ---------------------- 기본 설정 ----------------------
 st.set_page_config(page_title="PFC App v0", layout="wide")
 st.title("📊 Personal Finance Checkup (v0)")
 
-plt.rcParams["font.family"] = ["AppleGothic", "Malgun Gothic", "NanumGothic", "DejaVu Sans", "Arial", "sans-serif"]
+plt.rcParams["font.family"] = ["AppleGothic","Malgun Gothic","NanumGothic","DejaVu Sans","Arial","sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
-DEFAULT_COLORS_SUMMARY = {"Income": "#4E79A7","Expense": "#E15759","Remaining Balance": "#59A14F","Etc": "#9AA0A6"}
+DEFAULT_COLORS_SUMMARY = {"Income":"#4E79A7","Expense":"#E15759","Remaining Balance":"#59A14F","Etc":"#9AA0A6"}
 DEFAULT_COLORS_ASSETS  = {"Stock":"#4E79A7","Mutual Fund":"#59A14F","Real Estate":"#F28E2B","Savings":"#76B7B2",
                           "Bond":"#EDC948","Insurance":"#B07AA1","Annuity":"#9C755F","401K":"#E15759",
                           "403B":"#FF9DA7","Etc":"#9AA0A6"}
 DEFAULT_COLORS_LIAB    = {"CC Debt":"#E15759","Car Loan":"#F28E2B","Personal Loan":"#EDC948","Mortgage":"#4E79A7","Etc":"#9AA0A6"}
 
+# ---------- state ----------
 def init_state():
     ss = st.session_state
     ss.setdefault("df_summary", pd.DataFrame({"Category":["Income","Expense","Remaining Balance","Etc"],"Amount":[0,0,0,0]}))
@@ -26,34 +26,28 @@ def init_state():
     ss.setdefault("df_liab",    pd.DataFrame(columns=["Category","Amount"]))
     ss.setdefault("use_income_details", True)
     ss.setdefault("focus_next", None)
-
-init_state()
-
-def ensure_style_state():
-    ss = st.session_state
     ss.setdefault("fig_size", 4.0)
     ss.setdefault("title_fs", 14)
     ss.setdefault("pct_min_fs", 7)
     ss.setdefault("pct_max_fs", 16)
     ss.setdefault("list_top_n", 12)
     ss.setdefault("pct_distance", 0.68)
+init_state()
 
-ensure_style_state()
-
-# ---------------------- 사이드바 ----------------------
+# ---------- sidebar ----------
 with st.sidebar:
     st.markdown("### ⚙️ 그래프 스타일")
-    st.session_state["fig_size"] = st.slider("그래프 크기(인치)", 3.0, 8.0, st.session_state["fig_size"], 0.5, key="sl_fig")
-    st.session_state["title_fs"] = st.slider("제목 글씨 크기", 10, 28, st.session_state["title_fs"], 1, key="sl_title")
-    c1, c2 = st.columns(2)
-    with c1: st.session_state["pct_min_fs"] = st.slider("퍼센트 최소 글씨", 6, 14, st.session_state["pct_min_fs"], 1, key="sl_pct_min")
-    with c2: st.session_state["pct_max_fs"] = st.slider("퍼센트 최대 글씨", 12, 28, st.session_state["pct_max_fs"], 1, key="sl_pct_max")
-    st.session_state["pct_distance"] = st.slider("퍼센트 위치(중심↔테두리)", 0.55, 0.85, st.session_state["pct_distance"], 0.01, key="sl_pct_dist")
-    st.session_state["list_top_n"] = st.slider("우측 리스트 항목 수", 5, 20, st.session_state["list_top_n"], 1, key="sl_list_n")
+    st.session_state["fig_size"] = st.slider("그래프 크기(인치)", 3.0, 8.0, st.session_state["fig_size"], 0.5)
+    st.session_state["title_fs"] = st.slider("제목 글씨 크기", 10, 28, st.session_state["title_fs"], 1)
+    c1,c2 = st.columns(2)
+    with c1: st.session_state["pct_min_fs"] = st.slider("퍼센트 최소 글씨", 6, 14, st.session_state["pct_min_fs"], 1)
+    with c2: st.session_state["pct_max_fs"] = st.slider("퍼센트 최대 글씨", 12, 28, st.session_state["pct_max_fs"], 1)
+    st.session_state["pct_distance"] = st.slider("퍼센트 위치(중심↔테두리)", 0.55, 0.85, st.session_state["pct_distance"], 0.01)
+    st.session_state["list_top_n"] = st.slider("우측 리스트 항목 수", 5, 20, st.session_state["list_top_n"], 1)
 
-# ---------------------- 유틸 ----------------------
+# ---------- utils ----------
 def ensure_row(df, cat):
-    if not (df["Category"] == cat).any():
+    if not (df["Category"]==cat).any():
         df.loc[len(df)] = [cat, 0]
 
 def compute_summary(df_summary, df_expense, df_income, use_income_details):
@@ -68,7 +62,7 @@ def compute_summary(df_summary, df_expense, df_income, use_income_details):
         df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
     df.loc[df["Category"]=="Expense","Amount"] = exp_total
     income = float(df.loc[df["Category"]=="Income","Amount"].sum())
-    expense = float(df.loc[df["Category"]=="Expense","Amount"].sum())
+    expense= float(df.loc[df["Category"]=="Expense","Amount"].sum())
     df.loc[df["Category"]=="Remaining Balance","Amount"] = max(income-expense, 0)
     return df
 
@@ -127,9 +121,9 @@ def focus_category(label_text="Category"):
         </script>""", height=0
     )
 
-# ---------------------- 파일 I/O ----------------------
+# ---------- 파일 I/O ----------
 with st.expander("📂 파일 불러오기 / 저장", expanded=False):
-    up = st.file_uploader("XLSX 업로드 (시트: Summary, ExpenseDetails, IncomeDetails, Assets, Liabilities)", type=["xlsx"], key="upl_xlsx")
+    up = st.file_uploader("XLSX 업로드 (시트: Summary, ExpenseDetails, IncomeDetails, Assets, Liabilities)", type=["xlsx"])
     c1,c2,_ = st.columns([1,1,2])
     if up:
         try:
@@ -159,16 +153,31 @@ with st.expander("📂 파일 불러오기 / 저장", expanded=False):
             st.session_state.df_assets.to_excel(w, index=False, sheet_name="Assets")
             st.session_state.df_liab.to_excel(w, index=False, sheet_name="Liabilities")
         out.seek(0); return out.read()
-
     c2.download_button("현재 상태 엑셀 다운로드", data=export_bytes(),
                        file_name="PFC_Current.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       key="dl_current")
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ---------------------- 입력 & 관리 ----------------------
+# ---------- 실시간 요약(모든 탭 상단 고정) ----------
+calc_top = compute_summary(st.session_state.df_summary, st.session_state.df_expense,
+                           st.session_state.df_income, st.session_state.use_income_details)
+income = float(calc_top.loc[calc_top["Category"]=="Income","Amount"].sum())
+expense= float(calc_top.loc[calc_top["Category"]=="Expense","Amount"].sum())
+remain = float(calc_top.loc[calc_top["Category"]=="Remaining Balance","Amount"].sum())
+etc    = float(calc_top.loc[calc_top["Category"]=="Etc","Amount"].sum())
+
+st.markdown("### 📌 실시간 요약")
+m1,m2,m3,m4 = st.columns(4)
+m1.metric("Income", f"{income:,.2f}")
+m2.metric("Expense", f"{expense:,.2f}")
+m3.metric("Remaining", f"{remain:,.2f}")
+m4.metric("Etc", f"{etc:,.2f}")
+
+# ---------- 입력 & 관리 (탭 순서 변경: Summary를 맨 뒤로) ----------
 st.markdown("---")
 st.header("✍️ 입력 & 관리")
-tab_inc, tab_exp, tab_sum, tab_ast, tab_liab = st.tabs(["Income 입력","Expense 입력","Summary(보기/설정)","Assets","Liabilities"])
+tab_inc, tab_exp, tab_ast, tab_liab, tab_sum = st.tabs(
+    ["Income 입력","Expense 입력","Assets","Liabilities","Summary(보기/설정)"]
+)
 
 # Income
 with tab_inc:
@@ -228,32 +237,6 @@ with tab_exp:
                 st.success("삭제 완료!")
             else: st.info("선택한 행이 없습니다.")
 
-# Summary
-with tab_sum:
-    st.subheader("Summary (자동 집계)")
-    st.checkbox("Income을 'Income Details' 합계로 사용", value=st.session_state.use_income_details, key="chk_use_inc_details")
-    st.session_state.use_income_details = st.session_state.chk_use_inc_details
-
-    if not st.session_state.use_income_details:
-        cur_inc = float(st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Income","Amount"].sum())
-        new_inc = st.number_input("수동 Income 금액", min_value=0.0, step=100.0, value=cur_inc, key="ni_manual_income")
-        st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Income","Amount"] = new_inc
-        st.caption("※ 'Income Details'를 사용하지 않을 때만 적용됩니다.")
-
-    cur_etc = float(st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Etc","Amount"].sum())
-    new_etc = st.number_input("Etc 금액", min_value=0.0, step=50.0, value=cur_etc, key="ni_manual_etc")
-    st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Etc","Amount"] = new_etc
-
-    calc = compute_summary(st.session_state.df_summary, st.session_state.df_expense,
-                           st.session_state.df_income, st.session_state.use_income_details)
-    income = float(calc.loc[calc["Category"]=="Income","Amount"].sum())
-    expense= float(calc.loc[calc["Category"]=="Expense","Amount"].sum())
-    remain = float(calc.loc[calc["Category"]=="Remaining Balance","Amount"].sum())
-    etc    = float(calc.loc[calc["Category"]=="Etc","Amount"].sum())
-    m1,m2,m3,m4 = st.columns(4)
-    m1.metric("Income", f"{income:,.2f}"); m2.metric("Expense", f"{expense:,.2f}")
-    m3.metric("Remaining", f"{remain:,.2f}"); m4.metric("Etc", f"{etc:,.2f}")
-
 # Assets
 with tab_ast:
     st.subheader("자산 항목 추가")
@@ -292,7 +275,23 @@ with tab_liab:
     st.session_state.df_liab = st.data_editor(st.session_state.df_liab, num_rows="dynamic",
                                               use_container_width=True, key="ed_liab")
 
-# ---------------------- 시각화 ----------------------
+# Summary(보기/설정) – 상세 조정만 이 탭에서
+with tab_sum:
+    st.subheader("Summary (보기/설정)")
+    st.checkbox("Income을 'Income Details' 합계로 사용", value=st.session_state.use_income_details, key="chk_use_inc_details")
+    st.session_state.use_income_details = st.session_state.chk_use_inc_details
+
+    if not st.session_state.use_income_details:
+        cur_inc = float(st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Income","Amount"].sum())
+        new_inc = st.number_input("수동 Income 금액", min_value=0.0, step=100.0, value=cur_inc, key="ni_manual_income")
+        st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Income","Amount"] = new_inc
+        st.caption("※ 'Income Details'를 사용하지 않을 때만 적용됩니다.")
+
+    cur_etc = float(st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Etc","Amount"].sum())
+    new_etc = st.number_input("Etc 금액", min_value=0.0, step=50.0, value=cur_etc, key="ni_manual_etc")
+    st.session_state.df_summary.loc[st.session_state.df_summary["Category"]=="Etc","Amount"] = new_etc
+
+# ---------- 시각화 ----------
 st.markdown("---")
 st.header("📈 시각화")
 
@@ -303,7 +302,7 @@ draw_pie_with_list(df_sum_calc, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_
 draw_pie_with_list(st.session_state.df_assets, "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
 draw_pie_with_list(st.session_state.df_liab, "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
 
-# ---------------------- 포커스 이동 ----------------------
+# ---------- 포커스 이동 ----------
 t = st.session_state.get("focus_next")
 if t in {"income","expense","asset","liab"}:
     focus_category("Category")
