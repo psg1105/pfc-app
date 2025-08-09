@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 
 # =========================================
 # 페이지 & 전역 스타일
@@ -8,9 +9,9 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="PFC App v0", layout="wide")
 st.title("📊 Personal Finance Checkup (v0)")
 
-# matplotlib 폰트(무난한 sans-serif + 한글 후보)
-plt.rcParams["font.family"] = ["AppleGothic", "Malgun Gothic", "NanumGothic", "DejaVu Sans", "sans-serif"]
-plt.rcParams["axes.unicode_minus"] = False  # 한글 폰트 사용 시 마이너스 깨짐 방지
+# 폰트 설정(한글/영문 모두 무난한 후보, 특수문자 미사용)
+plt.rcParams["font.family"] = ["AppleGothic", "Malgun Gothic", "NanumGothic", "DejaVu Sans", "Arial", "sans-serif"]
+plt.rcParams["axes.unicode_minus"] = False  # 마이너스 깨짐 방지
 
 # =========================================
 # 기본 고정 색상 팔레트 (추천값)
@@ -49,8 +50,8 @@ DEFAULT_COLORS_LIAB = {
 def ensure_style_state():
     st.session_state.setdefault("fig_size", 4.5)   # 그래프 크기(인치) - 작게 기본
     st.session_state.setdefault("title_fs", 14)    # 제목 폰트 크기
-    st.session_state.setdefault("label_fs", 10)    # 라벨 폰트 크기
-    st.session_state.setdefault("pct_fs", 11)      # 퍼센트 폰트 크기
+    st.session_state.setdefault("label_fs", 10)    # 라벨 기본 글씨 크기(최소치 역할)
+    st.session_state.setdefault("pct_fs", 16)      # 라벨 최대 글씨 크기(최대치 역할)
 
 ensure_style_state()
 
@@ -60,28 +61,30 @@ ensure_style_state()
 with st.sidebar:
     st.markdown("### ⚙️ 그래프 스타일")
     st.session_state["fig_size"] = st.slider("그래프 크기(인치)", 3.0, 8.0, st.session_state["fig_size"], 0.5)
-    st.session_state["title_fs"] = st.slider("제목 글씨 크기", 10, 24, st.session_state["title_fs"], 1)
-    st.session_state["label_fs"] = st.slider("라벨 글씨 크기", 8, 20, st.session_state["label_fs"], 1)
-    st.session_state["pct_fs"] = st.slider("퍼센트 글씨 크기", 8, 20, st.session_state["pct_fs"], 1)
+    st.session_state["title_fs"] = st.slider("제목 글씨 크기", 10, 28, st.session_state["title_fs"], 1)
+    st.session_state["label_fs"] = st.slider("라벨 최소 글씨 크기", 8, 20, st.session_state["label_fs"], 1)
+    st.session_state["pct_fs"] = st.slider("라벨 최대 글씨 크기", 12, 28, st.session_state["pct_fs"], 1)
 
 # =========================================
 # 유틸
 # =========================================
 def draw_pie(df: pd.DataFrame, title: str, base_colors: dict, key_tag: str):
     """
-    df: 반드시 {Category, Amount}
+    df: {Category, Amount}
     base_colors: 카테고리별 기본색 dict
     key_tag: "summary" / "assets" / "liab" 등 고유 키(사이드바 color_picker용)
+    - 파이 조각 안쪽에 "카테고리\n퍼센트" 표기
+    - 조각 비율에 따라 글씨 크기 자동 스케일링
     """
     if df is None or df.empty:
         st.info(f"'{title}'에 표시할 데이터가 없습니다.")
         return
 
-    df = df.copy()
     if "Category" not in df.columns or "Amount" not in df.columns:
         st.error(f"'{title}' 데이터에 'Category'와 'Amount' 컬럼이 필요합니다.")
         return
 
+    df = df.copy()
     df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
     df = df.groupby("Category", as_index=False)["Amount"].sum()
     df = df[df["Amount"] > 0]
@@ -99,20 +102,38 @@ def draw_pie(df: pd.DataFrame, title: str, base_colors: dict, key_tag: str):
 
     colors = [color_map[c] for c in df["Category"]]
 
+    values = df["Amount"].to_numpy()
+    labels = df["Category"].tolist()
+    total = float(values.sum())
+    fracs = values / total  # 0~1
+
     fig, ax = plt.subplots(figsize=(st.session_state["fig_size"], st.session_state["fig_size"]))
+    # 외부 라벨은 제거(labels=None), autopct로 안쪽만 채운 뒤 텍스트 가공
     wedges, texts, autotexts = ax.pie(
-        df["Amount"],
-        labels=df["Category"],
-        autopct="%1.1f%%",
+        values,
+        labels=None,
+        autopct=lambda p: f"{p:.1f}%",
         startangle=90,
         colors=colors,
         textprops={"fontsize": st.session_state["label_fs"]},
     )
-    # 퍼센트 텍스트 스타일
-    for autotext in autotexts:
-        autotext.set_color("white")
-        autotext.set_fontsize(st.session_state["pct_fs"])
-        autotext.set_weight("bold")
+
+    # 조각 내부에 "카테고리\n퍼센트"로 표시 + 비율에 따라 폰트 크기 스케일링
+    min_fs = st.session_state["label_fs"]
+    max_fs = st.session_state["pct_fs"]
+
+    for i, aut in enumerate(autotexts):
+        # 자동 % 텍스트 가져오기
+        pct_txt = aut.get_text()  # "xx.x%"
+        # 조합 텍스트: "Category\nxx.x%"
+        aut.set_text(f"{labels[i]}\n{pct_txt}")
+
+        # 조각 비율에 따라 글씨 크기 보간
+        frac = float(fracs[i])  # 0~1
+        size = min_fs + (max_fs - min_fs) * frac  # 큰 조각일수록 크게
+        aut.set_fontsize(size)
+        aut.set_weight("bold")
+        aut.set_color("white")
 
     ax.axis("equal")
     plt.title(title, fontsize=st.session_state["title_fs"], fontweight="bold")
@@ -169,8 +190,8 @@ if uploaded_file:
                 expense_val = float(df_sum.loc[df_sum["Category"] == "Expense", "Amount"].sum())
                 df_sum.loc[df_sum["Category"] == "Remaining Balance", "Amount"] = max(income_val - expense_val, 0)
 
-                # 파이 차트 (Summary)
-                draw_pie(df_sum, "① Income / Expense / Remaining / Etc (비율)", DEFAULT_COLORS_SUMMARY, key_tag="summary")
+                # 파이 차트 (Summary) — 제목 단순화
+                draw_pie(df_sum, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
             else:
                 st.error("Summary 시트는 'Category, Amount' 컬럼이 필요합니다.")
         else:
@@ -183,7 +204,7 @@ if uploaded_file:
         if "Assets" in xls.sheet_names:
             df_assets = pd.read_excel(xls, sheet_name="Assets")
             if {"Category", "Amount"}.issubset(df_assets.columns):
-                draw_pie(df_assets, "② Assets 분포 (비율)", DEFAULT_COLORS_ASSETS, key_tag="assets")
+                draw_pie(df_assets, "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
             else:
                 st.error("Assets 시트는 'Category, Amount' 컬럼이 필요합니다.")
         else:
@@ -196,7 +217,7 @@ if uploaded_file:
         if "Liabilities" in xls.sheet_names:
             df_liab = pd.read_excel(xls, sheet_name="Liabilities")
             if {"Category", "Amount"}.issubset(df_liab.columns):
-                draw_pie(df_liab, "③ Liabilities 분포 (비율)", DEFAULT_COLORS_LIAB, key_tag="liab")
+                draw_pie(df_liab, "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
             else:
                 st.error("Liabilities 시트는 'Category, Amount' 컬럼이 필요합니다.")
         else:
