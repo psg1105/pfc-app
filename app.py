@@ -26,7 +26,7 @@ def init_state():
     ss.setdefault("df_assets",  pd.DataFrame(columns=["Category","Amount"]))
     ss.setdefault("df_liab",    pd.DataFrame(columns=["Category","Amount"]))
     ss.setdefault("use_income_details", True)
-    ss.setdefault("focus_next", None)
+    ss.setdefault("focus_next", None)  # "income" | "expense" | "asset" | "liab"
     ss.setdefault("fig_size", 4.0)
     ss.setdefault("title_fs", 14)
     ss.setdefault("pct_min_fs", 7)
@@ -112,14 +112,20 @@ def draw_pie_with_list(df, title, base_colors, key_tag):
             md.append(f"{chip} **{name}** — {pct:.1f}%")
         st.markdown("<br>".join(md), unsafe_allow_html=True)
 
-def focus_category(label_text="Category"):
+def focus_field_by_label(label_text: str):
+    # 현재 포커스 blur 후, 특정 라벨의 인풋을 찾아 focus + select
     st.components.v1.html(
-        f"""<script>
+        f"""
+        <script>
         setTimeout(function(){{
-            const els = window.parent.document.querySelectorAll('input[aria-label="{label_text}"]');
-            if(els&&els.length){{ els[0].focus(); els[0].select(); }}
-        }}, 60);
-        </script>""", height=0
+          if (document.activeElement) {{ document.activeElement.blur(); }}
+          const root = window.parent.document;
+          const els = root.querySelectorAll('input[aria-label="{label_text}"]');
+          if (els && els.length) {{ els[0].focus(); els[0].select(); }}
+        }}, 80);
+        </script>
+        """,
+        height=0,
     )
 
 def metrics_block(df_sum):
@@ -169,13 +175,13 @@ with st.expander("📂 파일 불러오기 / 저장", expanded=False):
                        file_name="PFC_Current.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ---------------------- 실시간 요약(모든 탭 상단) ----------------------
+# ---------------------- 실시간 요약 ----------------------
 calc_top = compute_summary(st.session_state.df_summary, st.session_state.df_expense,
                            st.session_state.df_income, st.session_state.use_income_details)
 st.markdown("### 📌 실시간 요약")
 metrics_block(calc_top)
 
-# ---------------------- 입력 & 관리 (Summary 탭을 맨 뒤) ----------------------
+# ---------------------- 입력 & 관리 (Summary 탭 맨 뒤) ----------------------
 st.markdown("---")
 st.header("✍️ 입력 & 관리")
 tab_inc, tab_exp, tab_ast, tab_liab, tab_sum = st.tabs(
@@ -187,9 +193,10 @@ with tab_inc:
     st.subheader("수입 항목 추가")
     with st.form("form_add_income", clear_on_submit=True):
         a,b,c = st.columns([1.2,2,1])
-        with a: in_cat  = st.text_input("Category", value="")
-        with b: in_desc = st.text_input("Description", value="")
-        with c: in_amt  = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0)
+        # ★ 라벨을 탭별로 유니크하게 지정
+        with a: in_cat  = st.text_input("Category (Income)", value="")
+        with b: in_desc = st.text_input("Description (Income)", value="")
+        with c: in_amt  = st.number_input("Amount (Income)", min_value=0.0, step=10.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
         if (in_cat or in_desc) or (in_amt>0):
@@ -197,7 +204,7 @@ with tab_inc:
                 pd.DataFrame([{"Category":in_cat,"Description":in_desc,"Amount":in_amt}])], ignore_index=True)
             st.success("추가 완료!")
         st.session_state.focus_next = "income"
-        st.rerun()  # 🔁 즉시 상단 요약 갱신
+        st.rerun()  # 즉시 갱신 및 포커스 스크립트 적용
 
     st.markdown("##### 현재 수입 내역")
     if st.session_state.df_income.empty: st.info("수입 항목이 없습니다.")
@@ -217,9 +224,9 @@ with tab_exp:
     st.subheader("지출 항목 추가")
     with st.form("form_add_expense", clear_on_submit=True):
         a,b,c = st.columns([1.2,2,1])
-        with a: exp_cat  = st.text_input("Category", value="")
-        with b: exp_desc = st.text_input("Description", value="")
-        with c: exp_amt  = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0)
+        with a: exp_cat  = st.text_input("Category (Expense)", value="")
+        with b: exp_desc = st.text_input("Description (Expense)", value="")
+        with c: exp_amt  = st.number_input("Amount (Expense)", min_value=0.0, step=10.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
         if (exp_cat or exp_desc) or (exp_amt>0):
@@ -247,8 +254,8 @@ with tab_ast:
     st.subheader("자산 항목 추가")
     with st.form("form_add_asset", clear_on_submit=True):
         a1,a2 = st.columns([2,1])
-        with a1: ast_cat = st.text_input("Category", value="")
-        with a2: ast_amt = st.number_input("Amount", min_value=0.0, step=100.0, value=0.0)
+        with a1: ast_cat = st.text_input("Category (Assets)", value="")
+        with a2: ast_amt = st.number_input("Amount (Assets)", min_value=0.0, step=100.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
         if ast_cat or (ast_amt>0):
@@ -267,8 +274,8 @@ with tab_liab:
     st.subheader("부채 항목 추가")
     with st.form("form_add_liab", clear_on_submit=True):
         l1,l2 = st.columns([2,1])
-        with l1: li_cat = st.text_input("Category", value="")
-        with l2: li_amt = st.number_input("Amount", min_value=0.0, step=100.0, value=0.0)
+        with l1: li_cat = st.text_input("Category (Liabilities)", value="")
+        with l2: li_amt = st.number_input("Amount (Liabilities)", min_value=0.0, step=100.0, value=0.0)
         ok = st.form_submit_button("추가")
     if ok:
         if li_cat or (li_amt>0):
@@ -285,7 +292,6 @@ with tab_liab:
 # Summary(보기/설정)
 with tab_sum:
     st.subheader("Summary (보기/설정)")
-    # 상단과 동일 메트릭도 같이 출력
     calc_in_tab = compute_summary(st.session_state.df_summary, st.session_state.df_expense,
                                   st.session_state.df_income, st.session_state.use_income_details)
     metrics_block(calc_in_tab)
@@ -310,13 +316,18 @@ st.header("📈 시각화")
 
 df_sum_calc = compute_summary(st.session_state.df_summary, st.session_state.df_expense,
                               st.session_state.df_income, st.session_state.use_income_details)
-def color_block(df, title, palette, key): draw_pie_with_list(df, title, palette, key)
 draw_pie_with_list(df_sum_calc, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
 draw_pie_with_list(st.session_state.df_assets, "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
 draw_pie_with_list(st.session_state.df_liab, "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
 
-# ---------------------- 포커스 이동 ----------------------
+# ---------------------- 포커스 이동 (정확히 해당 탭의 Category로) ----------------------
 t = st.session_state.get("focus_next")
-if t in {"income","expense","asset","liab"}:
-    focus_category("Category")
+if t == "income":
+    focus_field_by_label("Category (Income)")
+elif t == "expense":
+    focus_field_by_label("Category (Expense)")
+elif t == "asset":
+    focus_field_by_label("Category (Assets)")
+elif t == "liab":
+    focus_field_by_label("Category (Liabilities)")
 st.session_state["focus_next"] = None
