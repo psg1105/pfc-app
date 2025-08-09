@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import io
 
 # =========================================
 # 페이지 & 전역 스타일
@@ -9,12 +10,12 @@ import numpy as np
 st.set_page_config(page_title="PFC App v0", layout="wide")
 st.title("📊 Personal Finance Checkup (v0)")
 
-# 폰트 설정(한글/영문 모두 무난한 후보)
+# 폰트(한글/영문 무난 후보)
 plt.rcParams["font.family"] = ["AppleGothic", "Malgun Gothic", "NanumGothic", "DejaVu Sans", "Arial", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False  # 마이너스 깨짐 방지
 
 # =========================================
-# 기본 고정 색상 팔레트 (추천값)
+# 기본 고정 색상 팔레트
 # =========================================
 DEFAULT_COLORS_SUMMARY = {
     "Income": "#4E79A7",
@@ -22,7 +23,6 @@ DEFAULT_COLORS_SUMMARY = {
     "Remaining Balance": "#59A14F",
     "Etc": "#9AA0A6",
 }
-
 DEFAULT_COLORS_ASSETS = {
     "Stock": "#4E79A7",
     "Mutual Fund": "#59A14F",
@@ -35,7 +35,6 @@ DEFAULT_COLORS_ASSETS = {
     "403B": "#FF9DA7",
     "Etc": "#9AA0A6",
 }
-
 DEFAULT_COLORS_LIAB = {
     "CC Debt": "#E15759",
     "Car Loan": "#F28E2B",
@@ -45,15 +44,31 @@ DEFAULT_COLORS_LIAB = {
 }
 
 # =========================================
-# 스타일 상태(그래프/라벨) 기본값
+# 세션 상태 초기화
+# =========================================
+def init_state():
+    if "df_summary" not in st.session_state:
+        st.session_state.df_summary = pd.DataFrame({"Category": ["Income", "Expense", "Remaining Balance", "Etc"],
+                                                    "Amount":   [0,        0,         0,                    0]})
+    if "df_expense" not in st.session_state:
+        st.session_state.df_expense = pd.DataFrame(columns=["Category", "Description", "Amount"])
+    if "df_assets" not in st.session_state:
+        st.session_state.df_assets = pd.DataFrame(columns=["Category", "Amount"])
+    if "df_liab" not in st.session_state:
+        st.session_state.df_liab = pd.DataFrame(columns=["Category", "Amount"])
+
+init_state()
+
+# =========================================
+# 스타일 상태 기본값
 # =========================================
 def ensure_style_state():
-    st.session_state.setdefault("fig_size", 4.5)    # 그래프 크기(인치)
-    st.session_state.setdefault("title_fs", 14)     # 제목 폰트 크기
-    st.session_state.setdefault("label_min_fs", 9)  # 라벨 최소 글씨 크기
-    st.session_state.setdefault("label_max_fs", 18) # 라벨 최대 글씨 크기
-    st.session_state.setdefault("label_thresh_pct", 3.0)  # 이 퍼센트 미만은 라벨 숨김
-    st.session_state.setdefault("list_top_n", 12)   # 우측 리스트 표시 개수
+    st.session_state.setdefault("fig_size", 4.0)       # 기본 조금 작게
+    st.session_state.setdefault("title_fs", 14)
+    st.session_state.setdefault("pct_min_fs", 7)       # % 글씨 최소
+    st.session_state.setdefault("pct_max_fs", 16)      # % 글씨 최대
+    st.session_state.setdefault("list_top_n", 12)      # 우측 리스트 개수
+    st.session_state.setdefault("pct_distance", 0.68)  # % 텍스트 반경(0=중심, 1=테두리)
 
 ensure_style_state()
 
@@ -64,29 +79,45 @@ with st.sidebar:
     st.markdown("### ⚙️ 그래프 스타일")
     st.session_state["fig_size"] = st.slider("그래프 크기(인치)", 3.0, 8.0, st.session_state["fig_size"], 0.5)
     st.session_state["title_fs"] = st.slider("제목 글씨 크기", 10, 28, st.session_state["title_fs"], 1)
-    st.session_state["label_min_fs"] = st.slider("라벨 최소 글씨 크기", 6, 16, st.session_state["label_min_fs"], 1)
-    st.session_state["label_max_fs"] = st.slider("라벨 최대 글씨 크기", 12, 32, st.session_state["label_max_fs"], 1)
-    st.session_state["label_thresh_pct"] = st.slider("라벨 표시 임계값(%)", 0.0, 10.0, st.session_state["label_thresh_pct"], 0.5)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state["pct_min_fs"] = st.slider("퍼센트 최소 글씨", 6, 14, st.session_state["pct_min_fs"], 1)
+    with c2:
+        st.session_state["pct_max_fs"] = st.slider("퍼센트 최대 글씨", 12, 28, st.session_state["pct_max_fs"], 1)
+    st.session_state["pct_distance"] = st.slider("퍼센트 위치(중심↔테두리)", 0.55, 0.85, st.session_state["pct_distance"], 0.01)
     st.session_state["list_top_n"] = st.slider("우측 리스트 항목 수", 5, 20, st.session_state["list_top_n"], 1)
 
 # =========================================
 # 유틸
 # =========================================
 def ensure_row(df: pd.DataFrame, category_name: str):
-    """Summary에 필수 카테고리 행이 없으면 추가"""
     if not (df["Category"] == category_name).any():
         df.loc[len(df)] = [category_name, 0]
 
+def compute_summary(df_summary: pd.DataFrame, df_expense: pd.DataFrame) -> pd.DataFrame:
+    """Expense 합계 → Summary. Remaining = Income - Expense"""
+    df = df_summary.copy()
+    for cat in ["Income", "Expense", "Remaining Balance", "Etc"]:
+        ensure_row(df, cat)
+
+    # Expense 자동 합산
+    exp_total = 0.0
+    if not df_expense.empty and {"Amount"}.issubset(df_expense.columns):
+        exp_total = pd.to_numeric(df_expense["Amount"], errors="coerce").fillna(0).sum()
+
+    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
+    df.loc[df["Category"] == "Expense", "Amount"] = exp_total
+
+    income_val = float(df.loc[df["Category"] == "Income", "Amount"].sum())
+    expense_val = float(df.loc[df["Category"] == "Expense", "Amount"].sum())
+    df.loc[df["Category"] == "Remaining Balance", "Amount"] = max(income_val - expense_val, 0)
+    return df
+
 def draw_pie_with_list(df: pd.DataFrame, title: str, base_colors: dict, key_tag: str):
-    """
-    왼쪽: 파이 차트(내부 라벨, 작은 조각 숨김)
-    오른쪽: 퍼센트 내림차순 리스트
-    df: {Category, Amount}
-    """
+    """왼쪽: 파이(%만 내부 표시). 오른쪽: 퍼센트 내림차순 리스트"""
     if df is None or df.empty:
         st.info(f"'{title}'에 표시할 데이터가 없습니다.")
         return
-
     if "Category" not in df.columns or "Amount" not in df.columns:
         st.error(f"'{title}' 데이터에 'Category'와 'Amount' 컬럼이 필요합니다.")
         return
@@ -105,54 +136,44 @@ def draw_pie_with_list(df: pd.DataFrame, title: str, base_colors: dict, key_tag:
         for cat in df["Category"]:
             default = base_colors.get(cat, "#9AA0A6")
             color_map[cat] = st.color_picker(cat, default, key=f"{key_tag}_color_{cat}")
-
     colors = [color_map[c] for c in df["Category"]]
+
     values = df["Amount"].to_numpy()
     labels = df["Category"].tolist()
     total = float(values.sum())
     fracs = values / total
     percents = fracs * 100
 
-    # 화면 배치: 왼쪽 차트 / 오른쪽 리스트
     col_chart, col_list = st.columns([5, 2], gap="large")
 
-    # ---------- 파이 차트 ----------
+    # ---------- 파이 ----------
     with col_chart:
         fig, ax = plt.subplots(figsize=(st.session_state["fig_size"], st.session_state["fig_size"]))
 
-        # 라벨은 내부에서 따로 처리할 거라 외부 labels=None
         wedges, _, autotexts = ax.pie(
             values,
             labels=None,
             autopct=lambda p: f"{p:.1f}%",
             startangle=90,
             colors=colors,
-            textprops={"fontsize": st.session_state["label_min_fs"]},
+            pctdistance=st.session_state["pct_distance"],
+            textprops={"fontsize": st.session_state["pct_min_fs"], "color": "white", "weight": "bold"},
         )
 
-        # 내부 라벨: 작은 조각은 숨기고, 나머지는 "카테고리\nxx.x%" 표시
-        min_fs = st.session_state["label_min_fs"]
-        max_fs = st.session_state["label_max_fs"]
-        thresh = st.session_state["label_thresh_pct"]
-
+        # 글씨 크기 자동 보간(과대확대 억제)
+        min_fs = st.session_state["pct_min_fs"]
+        max_fs = st.session_state["pct_max_fs"]
         for i, aut in enumerate(autotexts):
-            pct_val = percents[i]
-            if pct_val < thresh:
-                aut.set_text("")  # 라벨 숨김
-                continue
-
-            # 텍스트 구성 및 스타일
-            aut.set_text(f"{labels[i]}\n{pct_val:.1f}%")
-            # 조각 비율로 글씨 크기 보간
-            frac = float(fracs[i])  # 0~1
-            size = min_fs + (max_fs - min_fs) * frac
+            frac = float(fracs[i])
+            scale = np.sqrt(frac)
+            size = min_fs + (max_fs - min_fs) * scale
             aut.set_fontsize(size)
-            aut.set_weight("bold")
-            aut.set_color("white")
-            aut.set_clip_on(True)  # 축 밖 그리지 않기
-            # 중앙 정렬 보장
-            aut.set_ha("center")
-            aut.set_va("center")
+            aut.set_ha("center"); aut.set_va("center"); aut.set_clip_on(True)
+
+        # 경계선
+        for w in wedges:
+            w.set_linewidth(1)
+            w.set_edgecolor("white")
 
         ax.axis("equal")
         plt.title(title, fontsize=st.session_state["title_fs"], fontweight="bold")
@@ -161,95 +182,149 @@ def draw_pie_with_list(df: pd.DataFrame, title: str, base_colors: dict, key_tag:
     # ---------- 우측 리스트 ----------
     with col_list:
         st.markdown("#### 비율 순 정렬")
-        order = np.argsort(-percents)  # 내림차순
+        order = np.argsort(-percents)
         top_n = int(st.session_state["list_top_n"])
-        items = [(labels[i], percents[i]) for i in order[:top_n]]
-
-        # 컬러칩과 함께 표시
+        items = [(labels[i], percents[i], colors[i]) for i in order[:top_n]]
         md_lines = []
-        for i, (name, pct) in enumerate(items, start=1):
-            chip = f"<span style='display:inline-block;width:10px;height:10px;background:{color_map[name]};border-radius:2px;margin-right:6px;'></span>"
+        for name, pct, col in items:
+            chip = f"<span style='display:inline-block;width:10px;height:10px;background:{col};border-radius:2px;margin-right:6px;'></span>"
             md_lines.append(f"{chip} **{name}** — {pct:.1f}%")
         st.markdown("<br>".join(md_lines), unsafe_allow_html=True)
 
 # =========================================
-# 업로더
+# 데이터 업로드/초기화/다운로드
 # =========================================
-uploaded_file = st.file_uploader(
-    "📂 XLSX 업로드 (시트: Summary, ExpenseDetails, Assets, Liabilities)",
-    type=["xlsx"]
-)
+with st.expander("📂 파일 불러오기 / 저장"):
+    uploaded = st.file_uploader("XLSX 업로드 (시트: Summary, ExpenseDetails, Assets, Liabilities)", type=["xlsx"])
+    col_u1, col_u2, col_u3 = st.columns([1,1,2])
 
-if uploaded_file:
-    try:
-        xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
+    if uploaded:
+        try:
+            xls = pd.ExcelFile(uploaded, engine="openpyxl")
 
-        # 0) ExpenseDetails 합계
-        total_exp = 0.0
-        df_ed = None
-        if "ExpenseDetails" in xls.sheet_names:
-            df_ed = pd.read_excel(xls, sheet_name="ExpenseDetails")
-            if {"Category", "Description", "Amount"}.issubset(df_ed.columns):
-                total_exp = pd.to_numeric(df_ed["Amount"], errors="coerce").fillna(0).sum()
-            else:
-                st.warning("ExpenseDetails 시트는 'Category, Description, Amount' 컬럼이 필요합니다.")
+            if "Summary" in xls.sheet_names:
+                st.session_state.df_summary = pd.read_excel(xls, sheet_name="Summary")
+            if "ExpenseDetails" in xls.sheet_names:
+                st.session_state.df_expense = pd.read_excel(xls, sheet_name="ExpenseDetails")
+            if "Assets" in xls.sheet_names:
+                st.session_state.df_assets = pd.read_excel(xls, sheet_name="Assets")
+            if "Liabilities" in xls.sheet_names:
+                st.session_state.df_liab = pd.read_excel(xls, sheet_name="Liabilities")
+
+            st.success("불러오기 완료")
+        except Exception as e:
+            st.error(f"불러오기 오류: {e}")
+
+    # 초기화
+    if col_u1.button("세션 초기화"):
+        for k in ["df_summary","df_expense","df_assets","df_liab"]:
+            if k in st.session_state: del st.session_state[k]
+        init_state()
+        st.experimental_rerun()
+
+    # 현재 상태를 엑셀로 다운로드
+    def make_excel_bytes() -> bytes:
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            compute_summary(st.session_state.df_summary, st.session_state.df_expense).to_excel(writer, index=False, sheet_name="Summary")
+            st.session_state.df_expense.to_excel(writer, index=False, sheet_name="ExpenseDetails")
+            st.session_state.df_assets.to_excel(writer, index=False, sheet_name="Assets")
+            st.session_state.df_liab.to_excel(writer, index=False, sheet_name="Liabilities")
+        out.seek(0)
+        return out.read()
+
+    col_u2.download_button("현재 상태 엑셀 다운로드", data=make_excel_bytes(),
+                           file_name="PFC_Current.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# =========================================
+# 입력/관리 섹션
+# =========================================
+st.markdown("---")
+st.header("✍️ 입력 & 관리")
+
+tab1, tab2, tab3, tab4 = st.tabs(["Expense 입력", "Summary(수정)", "Assets", "Liabilities"])
+
+# --- Expense 입력 ---
+with tab1:
+    st.subheader("지출 항목 추가")
+    c1, c2, c3 = st.columns([1.2, 2, 1])
+    with c1:
+        exp_cat = st.text_input("Category", value="")
+    with c2:
+        exp_desc = st.text_input("Description", value="")
+    with c3:
+        exp_amt = st.number_input("Amount", min_value=0.0, step=10.0, value=0.0)
+
+    add = st.button("추가")
+    if add:
+        if not exp_desc and not exp_cat and exp_amt == 0:
+            st.warning("최소한 Category 또는 Description, Amount를 입력해주세요.")
         else:
-            st.warning("시트 'ExpenseDetails' 가 없습니다. (Summary의 Expense는 0으로 집계)")
+            new_row = {"Category": exp_cat, "Description": exp_desc, "Amount": exp_amt}
+            st.session_state.df_expense = pd.concat([st.session_state.df_expense, pd.DataFrame([new_row])], ignore_index=True)
+            st.success("추가 완료!")
 
-        # 1) Summary + 자동 집계
-        df_sum = None
-        if "Summary" in xls.sheet_names:
-            df_sum = pd.read_excel(xls, sheet_name="Summary")
-            if {"Category", "Amount"}.issubset(df_sum.columns):
-                df_sum["Amount"] = pd.to_numeric(df_sum["Amount"], errors="coerce").fillna(0)
-                for cat in ["Income", "Expense", "Remaining Balance", "Etc"]:
-                    ensure_row(df_sum, cat)
-                # Expense 자동 반영 & Remaining 계산
-                df_sum.loc[df_sum["Category"] == "Expense", "Amount"] = total_exp
-                income_val = float(df_sum.loc[df_sum["Category"] == "Income", "Amount"].sum())
-                expense_val = float(df_sum.loc[df_sum["Category"] == "Expense", "Amount"].sum())
-                df_sum.loc[df_sum["Category"] == "Remaining Balance", "Amount"] = max(income_val - expense_val, 0)
+    st.markdown("##### 현재 지출 내역")
+    if st.session_state.df_expense.empty:
+        st.info("지출 항목이 없습니다.")
+    else:
+        # 삭제 체크박스
+        df_show = st.session_state.df_expense.copy()
+        df_show.index = range(1, len(df_show) + 1)  # 1부터 표시
+        del_idx = st.multiselect("삭제할 행 선택 (번호)", options=list(df_show.index))
+        st.dataframe(df_show, use_container_width=True)
 
-                draw_pie_with_list(df_sum, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
+        if st.button("선택 행 삭제"):
+            if del_idx:
+                # 실제 인덱스로 변환
+                real_idx = [i-1 for i in del_idx]
+                st.session_state.df_expense = st.session_state.df_expense.drop(real_idx).reset_index(drop=True)
+                st.success("삭제 완료!")
             else:
-                st.error("Summary 시트는 'Category, Amount' 컬럼이 필요합니다.")
-        else:
-            st.warning("시트 'Summary' 가 없습니다.")
+                st.info("선택한 행이 없습니다.")
 
-        # 2) Assets
-        df_assets = None
-        if "Assets" in xls.sheet_names:
-            df_assets = pd.read_excel(xls, sheet_name="Assets")
-            if {"Category", "Amount"}.issubset(df_assets.columns):
-                draw_pie_with_list(df_assets, "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
-            else:
-                st.error("Assets 시트는 'Category, Amount' 컬럼이 필요합니다.")
-        else:
-            st.warning("시트 'Assets' 가 없습니다.")
+# --- Summary 수정 ---
+with tab2:
+    st.subheader("Summary 수동 입력 (Income/Etc 등)")
+    st.caption("※ Expense, Remaining은 Expense Details로부터 자동 계산됩니다.")
+    editable = st.session_state.df_summary.copy()
+    # Expense/Remaining은 잠금처럼 보이도록 입력 막음
+    editable.loc[editable["Category"].isin(["Expense", "Remaining Balance"]), "Amount"] = pd.to_numeric(
+        editable.loc[editable["Category"].isin(["Expense", "Remaining Balance"]), "Amount"], errors="coerce"
+    ).fillna(0)
+    edited = st.data_editor(editable, num_rows="dynamic", use_container_width=True)
+    # Expense/Remaining은 사용자가 건드려도 반영 안함
+    st.session_state.df_summary = edited
+    st.info("변경사항은 즉시 반영됩니다. (Expense/Remaining은 자동 계산)")
 
-        # 3) Liabilities
-        df_liab = None
-        if "Liabilities" in xls.sheet_names:
-            df_liab = pd.read_excel(xls, sheet_name="Liabilities")
-            if {"Category", "Amount"}.issubset(df_liab.columns):
-                draw_pie_with_list(df_liab, "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
-            else:
-                st.error("Liabilities 시트는 'Category, Amount' 컬럼이 필요합니다.")
-        else:
-            st.warning("시트 'Liabilities' 가 없습니다.")
+# --- Assets ---
+with tab3:
+    st.subheader("Assets 편집")
+    st.session_state.df_assets = st.data_editor(
+        st.session_state.df_assets, num_rows="dynamic", use_container_width=True
+    )
 
-        # (선택) 원본 보기
-        with st.expander("원본 데이터 미리보기"):
-            if df_sum is not None:
-                st.write("Summary", df_sum)
-            if df_ed is not None:
-                st.write("ExpenseDetails", df_ed)
-            if df_assets is not None:
-                st.write("Assets", df_assets)
-            if df_liab is not None:
-                st.write("Liabilities", df_liab)
+# --- Liabilities ---
+with tab4:
+    st.subheader("Liabilities 편집")
+    st.session_state.df_liab = st.data_editor(
+        st.session_state.df_liab, num_rows="dynamic", use_container_width=True
+    )
 
-    except Exception as e:
-        st.error(f"파일 처리 중 오류: {e}")
-else:
-    st.info("템플릿을 다운로드하여 입력 후 업로드하세요. (시트: Summary, ExpenseDetails, Assets, Liabilities)")
+# =========================================
+# 시각화 (실시간 반영)
+# =========================================
+st.markdown("---")
+st.header("📈 시각화")
+
+# Summary 자동 집계 반영
+df_sum_calc = compute_summary(st.session_state.df_summary, st.session_state.df_expense)
+
+# 1) INCOME / EXPENSE
+draw_pie_with_list(df_sum_calc, "INCOME / EXPENSE", DEFAULT_COLORS_SUMMARY, key_tag="summary")
+
+# 2) ASSET
+draw_pie_with_list(st.session_state.df_assets, "ASSET", DEFAULT_COLORS_ASSETS, key_tag="assets")
+
+# 3) LIABILITY
+draw_pie_with_list(st.session_state.df_liab, "LIABILITY", DEFAULT_COLORS_LIAB, key_tag="liab")
