@@ -4,7 +4,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sqlite3
 from datetime import datetime
-import io
 
 # ---------------------- 기본 설정 ----------------------
 st.set_page_config(page_title="PFC App v1", layout="wide")
@@ -94,7 +93,7 @@ def init_db():
 
 def list_clients():
     with get_conn() as con:
-        return pd.read_sql_query("SELECT id, name, email, phone FROM clients ORDER BY id DESC", con)
+        return pd.read_sql_query("SELECT id, name, email, phone, home_address FROM clients ORDER BY id DESC", con)
 
 def get_client(client_id):
     with get_conn() as con:
@@ -173,10 +172,19 @@ def init_state():
     ss.setdefault("list_top_n", 12)
     ss.setdefault("pct_distance", 0.68)
     ss.setdefault("focus_next", None)
+    # 신규 등록 입력 상태
+    ss.setdefault("new_phone", "")
+    ss.setdefault("phone_formatted_once", False)
+    ss.setdefault("new_email", "")
+    ss.setdefault("addr_street", "")
+    ss.setdefault("addr_unit", "")
+    ss.setdefault("addr_city", "")
+    ss.setdefault("addr_state", "")
+    ss.setdefault("addr_zip", "")
 init_state()
 init_db()
 
-# ---------------------- 유틸(요약/차트/포커스) ----------------------
+# ---------------------- 유틸 ----------------------
 def compute_summary(client_id):
     if not client_id:
         return pd.DataFrame({"Category":["Income","Expense","Remaining Balance","Etc"], "Amount":[0,0,0,0]})
@@ -245,6 +253,45 @@ def focus_field_by_label(label_text: str):
         """, height=0
     )
 
+# ---- 입력 검사/포맷 ----
+import re
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_PATTERN.match(email.strip())) if email else False
+
+def format_phone_live(raw: str) -> str:
+    # 숫자만 추출
+    digits = "".join([c for c in raw if c.isdigit()])
+    if not digits:
+        return ""
+    # 맨 앞 1 자동
+    if digits[0] != "1":
+        digits = "1" + digits
+    # 최대 11자리(1 + 10)
+    digits = digits[:11]
+    # 포맷 1-AAA-BBB-CCCC
+    if len(digits) <= 1:
+        return digits
+    elif len(digits) <= 4:
+        return f"{digits[0]}-{digits[1:]}"
+    elif len(digits) <= 7:
+        return f"{digits[0]}-{digits[1:4]}-{digits[4:]}"
+    else:
+        return f"{digits[0]}-{digits[1:4]}-{digits[4:7]}-{digits[7:]}"
+
+def compose_address(street, unit, city, state, zipc):
+    parts = []
+    if street: parts.append(street.strip())
+    if unit: parts.append(unit.strip())
+    line1 = " ".join(parts).strip()
+    line2 = ", ".join([p for p in [city.strip() if city else "", state.strip() if state else ""] if p])
+    zipc = zipc.strip() if zipc else ""
+    full = line1
+    if line2: full = f"{full}, {line2}" if full else line2
+    if zipc:  full = f"{full} {zipc}" if full else zipc
+    return full
+
 # ---------------------- Sidebar (그래프 스타일) ----------------------
 with st.sidebar:
     st.markdown("### ⚙️ 그래프 스타일")
@@ -261,6 +308,9 @@ st.markdown("""
 <style>
 .sticky-summary {position: sticky; top: 0; z-index: 999;
  background-color: var(--background-color); padding-top: .5rem; padding-bottom:.5rem;}
+/* 이메일 오류 시 빨간 테두리 */
+.input-error input {border: 1px solid #e74c3c !important;}
+.small-error {color:#e74c3c; font-size:12px; margin-top:4px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -274,32 +324,74 @@ with tab_list:
     if clients_df.empty:
         st.info("등록된 클라이언트가 없습니다. '신규 등록' 탭에서 추가하세요.")
     else:
-        st.dataframe(clients_df, use_container_width=True, height=250)
+        st.dataframe(clients_df, use_container_width=True, height=260)
         ids = clients_df["id"].tolist()
         labels = [f'{r["name"]} — {r["email"] or ""} ({r["phone"] or ""})' for _,r in clients_df.iterrows()]
+        idx_default = 0 if st.session_state.current_client_id not in ids else ids.index(st.session_state.current_client_id)
         idx = st.selectbox("클라이언트 선택", options=list(range(len(ids))),
-                           format_func=lambda i: labels[i], index=0 if st.session_state.current_client_id not in ids else ids.index(st.session_state.current_client_id))
+                           format_func=lambda i: labels[i], index=idx_default)
         st.session_state.current_client_id = ids[idx]
         st.success("선택되었습니다. 아래에서 입력을 진행하세요.")
 
 with tab_new:
     st.markdown("#### 새 클라이언트 등록")
-    with st.form("form_new_client", clear_on_submit=True):
+    # 실시간 포맷/검사
+    st.session_state.new_phone = format_phone_live(st.session_state.new_phone)
+
+    with st.form("form_new_client", clear_on_submit=False):
         c1,c2 = st.columns(2)
-        with c1: name = st.text_input("Client Name*")
-        with c2: phone = st.text_input("Phone")
-        email = st.text_input("Email")
-        home_address = st.text_input("Home address")
-        notes = st.text_area("Notes", height=80)
-        submit_new = st.form_submit_button("등록")
+        with c1: name = st.text_input("Client Name*", key="new_name")
+        with c2: phone = st.text_input("Phone (자동 포맷)", key="new_phone", placeholder="1-224-829-2014")
+        # 이메일
+        email_container = st.container()
+        with email_container:
+            email = st.text_input("Email (형식 검사)", key="new_email", placeholder="name@example.com")
+        # 주소 5칸
+        st.markdown("**Home address**")
+        a1,a2 = st.columns([2,1])
+        with a1: addr_street = st.text_input("Street Address", key="addr_street")
+        with a2: addr_unit   = st.text_input("Ste#/Apt#/Unit#", key="addr_unit")
+        a3,a4,a5 = st.columns([2,1,1])
+        with a3: addr_city  = st.text_input("City", key="addr_city")
+        with a4: addr_state = st.text_input("State", key="addr_state")
+        with a5: addr_zip   = st.text_input("Zip Code", key="addr_zip")
+
+        notes = st.text_area("Notes", key="new_notes", height=80)
+
+        # 이메일 유효성 & 경고
+        valid_email = is_valid_email(email)
+        # 폼 안에서 스타일 조정
+        if email.strip() and not valid_email:
+            st.markdown("<div class='small-error'>이메일 형식이 아닙니다. 예: name@example.com</div>", unsafe_allow_html=True)
+
+        # 제출 버튼 (이메일 오류면 비활성)
+        submit_new = st.form_submit_button("등록", disabled=(not name.strip()) or (email.strip() and not valid_email))
+
+    # 이메일 입력칸 빨간 테두리 적용
+    if st.session_state.get("new_email","").strip() and (not is_valid_email(st.session_state["new_email"])):
+        st.markdown("""
+        <script>
+        const root = window.parent.document;
+        const labels = [...root.querySelectorAll('label')];
+        const target = labels.find(l => l.textContent.includes('Email (형식 검사)'));
+        if (target){
+            const wrapper = target.closest('div');
+            if (wrapper){ wrapper.classList.add('input-error'); }
+        }
+        </script>
+        """, unsafe_allow_html=True)
+
     if submit_new:
-        if not name.strip():
-            st.warning("이름은 필수입니다.")
-        else:
-            new_id = insert_client(name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
-            st.session_state.current_client_id = new_id
-            st.success("등록 완료! 리스트/선택 탭에서 확인되며, 입력 탭이 활성화됩니다.")
-            st.rerun()
+        # 주소 합치기
+        full_address = compose_address(addr_street, addr_unit, addr_city, addr_state, addr_zip)
+        # 저장
+        new_id = insert_client(name.strip(), st.session_state.new_phone.strip(), email.strip(), full_address, st.session_state.get("new_notes","").strip())
+        st.session_state.current_client_id = new_id
+        st.success("등록 완료! 리스트/선택 탭에서 확인되며, 입력 탭이 활성화됩니다.")
+        # 신규 폼 초기화
+        for k in ["new_name","new_phone","new_email","addr_street","addr_unit","addr_city","addr_state","addr_zip","new_notes"]:
+            st.session_state[k] = ""
+        st.rerun()
 
 with tab_edit:
     st.markdown("#### 선택된 클라이언트 프로필 수정")
@@ -312,18 +404,15 @@ with tab_edit:
         with st.form("form_edit_client"):
             c1,c2 = st.columns(2)
             with c1: name = st.text_input("Client Name*", value=name0 or "")
-            with c2: phone = st.text_input("Phone", value=phone0 or "")
+            with c2: phone = st.text_input("Phone (수정 시 숫자/하이픈 허용)", value=phone0 or "")
             email = st.text_input("Email", value=email0 or "")
-            home_address = st.text_input("Home address", value=addr0 or "")
+            home_address = st.text_input("Home address (수정용 전체 문자열)", value=addr0 or "")
             notes = st.text_area("Notes", value=notes0 or "", height=80)
-            submit_edit = st.form_submit_button("저장/업데이트")
+            submit_edit = st.form_submit_button("저장/업데이트", disabled=(not name.strip()) or (email and not is_valid_email(email)))
         if submit_edit:
-            if not name.strip():
-                st.warning("이름은 필수입니다.")
-            else:
-                update_client(cid, name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
-                st.success("프로필 저장 완료!")
-                st.rerun()
+            update_client(cid, name.strip(), phone.strip(), email.strip(), home_address.strip(), notes.strip())
+            st.success("프로필 저장 완료!")
+            st.rerun()
 
 # ---------------------- 선택된 클라이언트 체크 ----------------------
 client_id = st.session_state.current_client_id
