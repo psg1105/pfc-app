@@ -393,7 +393,6 @@ with tab_list:
 
 with tab_new:
     st.markdown("#### 새 클라이언트 등록")
-    # on_change로 입력 중 자동 하이픈
     with st.form("form_new_client", clear_on_submit=False):
         n1, n2 = st.columns(2)
         with n1: first_name = st.text_input("First Name", key="new_first")
@@ -414,7 +413,7 @@ with tab_new:
         with a5: addr_zip   = st.text_input("Zip Code", key="addr_zip")
         notes = st.text_area("Notes", key="new_notes", height=80)
 
-        submit_new = st.form_submit_button("등록")  # 항상 활성화
+        submit_new = st.form_submit_button("등록")
 
     if submit_new:
         full_name = f"{(st.session_state.get('new_first') or '').strip()} {(st.session_state.get('new_last') or '').strip()}".strip()
@@ -510,7 +509,7 @@ with tab_exp:
     df_exp = df_query("SELECT id, category as Category, description as Description, amount as Amount FROM expenses WHERE client_id=? ORDER BY id DESC", client_id)
     if df_exp.empty: st.info("지출 항목이 없습니다.")
     else:
-        df_show = df_exp.copy(); df_show.index = range(1,len[df_show)+1)
+        df_show = df_exp.copy(); df_show.index = range(1, len(df_show)+1)  # <<< 오타 수정
         del_idx = st.multiselect("삭제할 행 선택 (번호)", options=list(df_show.index), key="ms_del_exp")
         st.dataframe(df_show, use_container_width=True, height=300)
         if st.button("선택 행 삭제", key="btn_del_exp"):
