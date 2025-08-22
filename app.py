@@ -1,4 +1,4 @@
-\import streamlit as st
+import streamlit as st
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -82,7 +82,6 @@ def build_home_address(street: str, apt: str, city: str, state: str, zipcode: st
 # =====================
 # Persistence helpers
 # =====================
-
 def load_clients() -> list:
     try:
         return json.loads(CLIENTS_FILE.read_text(encoding="utf-8"))
@@ -173,17 +172,17 @@ st.session_state.reg_phone = format_phone(st.session_state.reg_phone)
 
 
 def clear_transient_inputs(client_id: str | None):
+    """Clear temporary widget values that are namespaced with a specific client id."""
     if not client_id:
         return
-    # Remove any widget values namespaced with this client_id
     suffix = f"_{client_id}"
     for key in list(st.session_state.keys()):
         if key.endswith(suffix) and (
-            key.startswith("income_details_") or
-            key.startswith("expense_details_") or
-            key.startswith("assets_") or
-            key.startswith("liabilities_") or
-            key.startswith("summary_etc_")
+            key.startswith("income_details_")
+            or key.startswith("expense_details_")
+            or key.startswith("assets_")
+            or key.startswith("liabilities_")
+            or key.startswith("summary_etc_")
         ):
             st.session_state.pop(key, None)
 
@@ -565,7 +564,7 @@ with TAB3:
                             unsafe_allow_html=True,
                         )
                     else:
-                        rec = {"category": inputs["category"].strip(), "amount": float(inputs["amount"]) }
+                        rec = {"category": inputs["category"].strip(), "amount": float(inputs["amount"])}
                         if section_key in ("income_details", "expense_details"):
                             rec["desc"] = (inputs.get("desc") or "").strip()
                         finance[section_key].append(rec)
