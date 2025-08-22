@@ -201,7 +201,7 @@ TAB1, TAB2, TAB3, TAB4 = st.tabs(["1) 신규 등록", "2) 리스트/선택", "3)
 # -------- TAB 1: 신규 등록 --------
 with TAB1:
     st.subheader("1-1. 신규 등록")
-    with st.form("new_client_form", clear_on_submit=False):
+    with st.form("new_client_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
             st.text_input("First Name", key="reg_first")
@@ -283,13 +283,6 @@ with TAB1:
                 clients.append(new_client)
                 save_clients(clients)
                 st.success("등록되었습니다.")
-                # Reset form fields
-                for k in [
-                    "reg_first", "reg_last", "reg_email", "reg_phone",
-                    "reg_street", "reg_apt", "reg_city", "reg_state", "reg_zip",
-                    "reg_notes",
-                ]:
-                    st.session_state[k] = ""
                 st.rerun()
 
 # -------- TAB 2: 리스트/선택 & 프로필 수정/삭제 --------
