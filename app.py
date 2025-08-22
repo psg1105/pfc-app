@@ -228,6 +228,11 @@ def clear_transient_inputs(client_id: str | None):
         ):
             st.session_state.pop(key, None)
 
+def reset_keys(*keys: str):
+    """입력 완료 후 위젯 상태 안전 초기화 (다음 rerun에 기본값으로)."""
+    for k in keys:
+        st.session_state.pop(k, None)
+
 # =====================
 # Sidebar: global toggles
 # =====================
@@ -621,7 +626,6 @@ with TAB3:
                 cat = str(r.get("category", "")).strip()
                 if cat == "":
                     continue
-                # amount
                 try:
                     amt = float(r.get("amount", 0))
                     if amt < 0:
@@ -630,9 +634,7 @@ with TAB3:
                 except Exception:
                     errs.append(f"{title} 행 {i}: Amount가 올바르지 않습니다.")
                     continue
-                # date -> ISO string
                 d_str = to_iso_date(r.get("date"))
-
                 row = {"category": cat, "amount": amt, "date": d_str}
                 if has_desc:
                     row["desc"] = str(r.get("desc", "")).strip()
@@ -644,27 +646,35 @@ with TAB3:
 
         def editor_section(title: str, section_key: str, has_desc: bool, key_prefix: str):
             st.markdown(f"### {title}")
-
             lcol, rcol = st.columns([1, 3])
 
             with lcol:
                 st.caption("프리셋 추가")
                 presets = PRESETS.get(section_key, [])
-                preset_sel = st.multiselect("카테고리", presets, key=f"{key_prefix}_presel_{sel_id}")
+                preset_key = f"{key_prefix}_presel_{sel_id}"
+                preset_sel = st.multiselect("카테고리", presets, key=preset_key)
                 if st.button("프리셋 행 추가", key=f"{key_prefix}_addpreset_{sel_id}"):
                     df = get_working_df(section_key)
                     for p in preset_sel:
                         row = _empty_row(section_key); row["category"] = p
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                     set_working_df(section_key, df)
+                    # 입력값 초기화
+                    reset_keys(preset_key)
                     st.success("프리셋을 추가했습니다."); st.rerun()
 
                 st.divider()
                 st.caption("빠른 입력")
-                q_cat = st.selectbox("Category", options=[""] + PRESETS.get(section_key, []), key=f"{key_prefix}_quick_cat_{sel_id}")
-                q_desc = st.text_input("Description", key=f"{key_prefix}_quick_desc_{sel_id}") if has_desc else ""
-                q_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{key_prefix}_quick_amt_{sel_id}")
-                q_date = st.date_input("Date", value=date.today(), key=f"{key_prefix}_quick_date_{sel_id}")
+                q_cat_key  = f"{key_prefix}_quick_cat_{sel_id}"
+                q_desc_key = f"{key_prefix}_quick_desc_{sel_id}"
+                q_amt_key  = f"{key_prefix}_quick_amt_{sel_id}"
+                q_date_key = f"{key_prefix}_quick_date_{sel_id}"
+
+                q_cat = st.selectbox("Category", options=[""] + PRESETS.get(section_key, []), key=q_cat_key)
+                q_desc = st.text_input("Description", key=q_desc_key) if has_desc else ""
+                q_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=q_amt_key)
+                q_date = st.date_input("Date", value=date.today(), key=q_date_key)
+
                 if st.button("➕ 한 행 추가", key=f"{key_prefix}_quick_add_{sel_id}"):
                     if (q_cat or "").strip() == "":
                         st.warning("Category를 선택하세요.")
@@ -674,12 +684,10 @@ with TAB3:
                         if has_desc: row["desc"] = (q_desc or "").strip()
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                         set_working_df(section_key, df)
-                        # 안전 초기화: 직접 대입 대신 pop으로 비우기
-                        st.session_state.pop(f"{key_prefix}_quick_cat_{sel_id}", None)
+                        # 모든 입력 위젯 초기화
+                        reset_keys(q_cat_key, q_amt_key, q_date_key)
                         if has_desc:
-                            st.session_state.pop(f"{key_prefix}_quick_desc_{sel_id}", None)
-                        st.session_state.pop(f"{key_prefix}_quick_amt_{sel_id}", None)
-                        st.session_state.pop(f"{key_prefix}_quick_date_{sel_id}", None)
+                            reset_keys(q_desc_key)
                         st.success("추가되었습니다."); st.rerun()
 
                 st.divider()
@@ -692,12 +700,15 @@ with TAB3:
 
                 df_current = get_working_df(section_key)
                 if len(df_current) > 0:
-                    dup_idx = st.number_input("복제할 행 index", min_value=0, max_value=max(0, len(df_current)-1), value=0, step=1, key=f"{key_prefix}_dupidx_{sel_id}")
+                    dup_idx_key = f"{key_prefix}_dupidx_{sel_id}"
+                    dup_idx = st.number_input("복제할 행 index", min_value=0, max_value=max(0, len(df_current)-1), value=0, step=1, key=dup_idx_key)
                     if st.button("선택 행 복제", key=f"{key_prefix}_duprow_{sel_id}"):
                         df = get_working_df(section_key)
                         row = df.iloc[int(dup_idx)].to_dict()
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-                        set_working_df(section_key, df); st.success("복제했습니다."); st.rerun()
+                        set_working_df(section_key, df)
+                        reset_keys(dup_idx_key)
+                        st.success("복제했습니다."); st.rerun()
 
                 if st.button("원본으로 되돌리기", key=f"{key_prefix}_reset_{sel_id}"):
                     set_working_df(section_key, _df_from_rows(section_key, finance.get(section_key, [])))
@@ -772,7 +783,7 @@ with TAB3:
         if st.button("Etc 저장"):
             finance.setdefault("summary", {})["etc"] = float(new_etc)
             save_client_finance(sel_id, finance)
-            st.session_state.pop(etc_key, None)
+            reset_keys(etc_key)
             st.success("저장되었습니다."); st.rerun()
 
         # Quick summary (all-time)
