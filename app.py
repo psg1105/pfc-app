@@ -1,12 +1,16 @@
 import streamlit as st
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 import uuid
 import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import io
+import os
+import tempfile
+import shutil
 
 # =====================
 # App configuration
@@ -32,6 +36,9 @@ STATE_RE = re.compile(r"^[A-Za-z]{2}$")
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def today_iso_date() -> str:
+    return date.today().isoformat()  # YYYY-MM-DD
 
 def only_digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
@@ -70,6 +77,24 @@ def build_home_address(street: str, apt: str, city: str, state: str, zipcode: st
     return ", ".join(pieces)
 
 # =====================
+# Robust file I/O
+# =====================
+def atomic_write(path: Path, text: str) -> None:
+    try:
+        if path.exists():
+            bak = path.with_suffix(path.suffix + ".bak")
+            try:
+                shutil.copy2(path, bak)
+            except Exception:
+                pass
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp_path = Path(tmp.name)
+        os.replace(str(tmp_path), str(path))
+    except Exception as e:
+        st.error(f"파일 저장 중 오류: {e}")
+
+# =====================
 # Persistence helpers
 # =====================
 def load_clients() -> list:
@@ -79,7 +104,7 @@ def load_clients() -> list:
         return []
 
 def save_clients(clients: list) -> None:
-    CLIENTS_FILE.write_text(json.dumps(clients, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write(CLIENTS_FILE, json.dumps(clients, ensure_ascii=False, indent=2))
 
 def get_client(clients: list, client_id: str) -> dict | None:
     for c in clients:
@@ -91,6 +116,7 @@ def client_data_path(client_id: str) -> Path:
     return DATA_DIR / f"client_{client_id}.json"
 
 def _empty_finance() -> dict:
+    # 각 행에 선택적 "date": "YYYY-MM-DD" 허용
     return {
         "income_details": [],
         "expense_details": [],
@@ -103,7 +129,7 @@ def load_client_finance(client_id: str) -> dict:
     p = client_data_path(client_id)
     if not p.exists():
         data = _empty_finance()
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(p, json.dumps(data, ensure_ascii=False, indent=2))
         return data
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
@@ -117,7 +143,7 @@ def load_client_finance(client_id: str) -> dict:
 
 def save_client_finance(client_id: str, data: dict) -> None:
     p = client_data_path(client_id)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write(p, json.dumps(data, ensure_ascii=False, indent=2))
 
 def delete_client_and_data(client_id: str) -> None:
     p = client_data_path(client_id)
@@ -131,12 +157,30 @@ def delete_client_and_data(client_id: str) -> None:
     save_clients(clients)
 
 # =====================
+# Duplicate detection
+# =====================
+def find_duplicates(clients: list, email: str, phone: str, exclude_id: str | None = None) -> list:
+    email_norm = (email or "").strip().lower()
+    phone_norm = only_digits(phone or "")
+    dups = []
+    for c in clients:
+        if exclude_id and c.get("id") == exclude_id:
+            continue
+        if (c.get("email","").strip().lower() == email_norm) or (only_digits(c.get("phone","")) == phone_norm):
+            dups.append({"id": c.get("id"), "name": f"{c.get('first','')} {c.get('last','')}",
+                         "email": c.get("email",""), "phone": c.get("phone",""),
+                         "archived": bool(c.get("archived", False))})
+    return dups
+
+# =====================
 # Session defaults & helpers
 # =====================
 if "selected_client_id" not in st.session_state:
     st.session_state.selected_client_id = None
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
+if "autosave" not in st.session_state:
+    st.session_state.autosave = False  # 자동 저장 토글
 
 # registration form state
 for k in [
@@ -160,11 +204,23 @@ def clear_transient_inputs(client_id: str | None):
             or key.startswith("liabilities_editor_")
             or key.startswith("summary_etc_")
             or key.endswith(f"_working_{client_id}")
+            or key.startswith("income_quick_")
+            or key.startswith("expense_quick_")
+            or key.startswith("assets_quick_")
+            or key.startswith("liabilities_quick_")
+            or key.endswith("_presel_"+str(client_id))
         ):
             st.session_state.pop(key, None)
 
 # =====================
-# Top summary
+# Sidebar: global toggles
+# =====================
+st.sidebar.markdown("### ⚙️ 설정")
+st.sidebar.checkbox("자동 저장 (표 편집 즉시 저장)", key="autosave")
+st.sidebar.caption("오류가 있으면 자동 저장이 보류되고 경고가 표시됩니다.")
+
+# =====================
+# Top summary (all-time)
 # =====================
 summary_box = st.container()
 with summary_box:
@@ -218,6 +274,7 @@ with TAB1:
             st.text_input("Zip (12345 or 12345-6789)", key="reg_zip")
 
         st.text_area("Notes", key="reg_notes")
+        allow_dup = st.checkbox("중복 무시하고 등록", value=False)
 
         submitted = st.form_submit_button("등록")
         if submitted:
@@ -230,8 +287,16 @@ with TAB1:
             if not st.session_state.reg_city.strip(): errs.append("City를 입력하세요.")
             if not validate_state(st.session_state.reg_state): errs.append("State는 2글자여야 합니다.")
             if not validate_zip(st.session_state.reg_zip): errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
+
+            clients_local = load_clients()
+            dups = find_duplicates(clients_local, st.session_state.reg_email, st.session_state.reg_phone)
+            if dups and not allow_dup:
+                errs.append("이미 동일 Email 또는 Phone을 가진 클라이언트가 존재합니다. (아래 표 참고)")
+
             if errs:
                 st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
+                if dups:
+                    st.dataframe(pd.DataFrame(dups), use_container_width=True, hide_index=True)
             else:
                 phone_fmt = format_phone(st.session_state.reg_phone)
                 state_up = st.session_state.reg_state.strip().upper()
@@ -253,23 +318,31 @@ with TAB1:
                     "address_zip": st.session_state.reg_zip.strip(),
                     "notes": st.session_state.reg_notes.strip(),
                     "created_at": now_iso(),
+                    "archived": False,  # 아카이브 플래그
                 }
-                clients = load_clients(); clients.append(new_client); save_clients(clients)
-                st.success("등록되었습니다."); st.rerun()
+                clients_local.append(new_client)
+                save_clients(clients_local)
+                st.success("등록되었습니다.")
+                st.rerun()
 
-# -------- TAB 2: 리스트/선택 & 프로필 수정/삭제 --------
+# -------- TAB 2: 리스트/선택 & 프로필 수정/삭제 + 내보내기 + 아카이브 --------
 with TAB2:
     st.subheader("1-2. 리스트/선택/프로필")
     clients = load_clients()
 
     if clients:
-        rows = [{
+        include_archived = st.checkbox("아카이브 포함해서 보기", value=False, key="include_archived")
+
+        base_rows = [{
             "id": c.get("id"),
             "name": f"{c.get('first','')} {c.get('last','')}",
             "email": c.get("email",""),
             "phone": c.get("phone",""),
             "home_address": c.get("home_address",""),
+            "archived": bool(c.get("archived", False)),
         } for c in clients]
+
+        rows = [r for r in base_rows if include_archived or (not r["archived"])]
 
         search_q = st.text_input("검색 (name / email / phone / address)", key="client_search", placeholder="e.g., chris, 224-829, deerfield, gmail")
         def norm_phone(p): return re.sub(r"\D","",p or "")
@@ -288,7 +361,7 @@ with TAB2:
         if not filtered: st.warning("검색 결과가 없습니다.")
         st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
 
-        labels = [f"{r['name']} ({r['email']})" for r in filtered]
+        labels = [f"{'(A) ' if r['archived'] else ''}{r['name']} ({r['email']})" for r in filtered]
         ids    = [r["id"] for r in filtered]
         idx=0
         if st.session_state.selected_client_id in ids: idx = ids.index(st.session_state.selected_client_id)
@@ -306,11 +379,68 @@ with TAB2:
                 st.markdown("---")
                 c1,c2 = st.columns([2,2])
                 with c1:
-                    st.markdown(f"**{client.get('first','')} {client.get('last','')}**")
+                    st.markdown(f"**{client.get('first','')} {client.get('last','')}** {'(Archived)' if client.get('archived') else ''}")
                     st.write(client.get("email","")); st.write(client.get("phone",""))
                 with c2:
                     st.write(client.get("home_address","")); st.caption(client.get("notes",""))
 
+                # Archive / Unarchive toggle
+                arch_col1, arch_col2 = st.columns([1,3])
+                with arch_col1:
+                    if not client.get("archived", False):
+                        if st.button("📦 아카이브", key="btn_archive"):
+                            cs = load_clients()
+                            c = get_client(cs, client["id"]); 
+                            if c: 
+                                c["archived"] = True
+                                save_clients(cs)
+                                st.success("아카이브로 이동했습니다.")
+                                # 선택 해제 (기본 리스트에서는 숨김)
+                                st.session_state.selected_client_id = None
+                                st.rerun()
+                    else:
+                        if st.button("♻️ 아카이브 해제", key="btn_unarchive"):
+                            cs = load_clients()
+                            c = get_client(cs, client["id"])
+                            if c:
+                                c["archived"] = False
+                                save_clients(cs)
+                                st.success("아카이브를 해제했습니다.")
+                                st.rerun()
+
+                # ===== Export buttons =====
+                expander = st.expander("📤 내보내기 (다운로드)", expanded=False)
+                with expander:
+                    fin = load_client_finance(client["id"])
+                    json_bytes = json.dumps(fin, ensure_ascii=False, indent=2).encode("utf-8")
+                    st.download_button(
+                        "클라이언트 재무데이터 (JSON)",
+                        data=json_bytes, file_name=f"client_{client['id']}_finance.json", mime="application/json",
+                        key=f"dl_fin_json_{client['id']}"
+                    )
+
+                    def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+                        buf = io.StringIO()
+                        df.to_csv(buf, index=False)
+                        return buf.getvalue().encode("utf-8")
+
+                    for sec, cols, title in [
+                        ("income_details", ["category","desc","amount","date"], "Income"),
+                        ("expense_details", ["category","desc","amount","date"], "Expense"),
+                        ("assets", ["category","amount","date"], "Assets"),
+                        ("liabilities", ["category","amount","date"], "Liabilities"),
+                    ]:
+                        sec_rows = fin.get(sec, [])
+                        sec_df = pd.DataFrame(sec_rows, columns=cols)
+                        st.download_button(
+                            f"{title} (CSV)",
+                            data=df_to_csv_bytes(sec_df),
+                            file_name=f"client_{client['id']}_{sec}.csv",
+                            mime="text/csv",
+                            key=f"dl_{sec}_{client['id']}"
+                        )
+
+            # ===== Edit / Delete =====
             if client:
                 if st.session_state._edit_loaded_id != client["id"]:
                     st.session_state.edit_first  = client.get("first","")
@@ -347,6 +477,8 @@ with TAB2:
                         st.text_input("Zip (12345 or 12345-6789)", key="edit_zip")
                     st.text_area("Notes", key="edit_notes")
 
+                    allow_dup_edit = st.checkbox("중복 무시하고 저장", value=False)
+
                     csave, cdel = st.columns([1,1])
                     with csave: save_clicked = st.form_submit_button("수정 내용 저장")
                     with cdel:  del_clicked  = st.form_submit_button("선택 클라이언트 삭제", help="선택한 클라이언트와 해당 재무 데이터를 모두 삭제합니다 (되돌릴 수 없음)")
@@ -361,10 +493,18 @@ with TAB2:
                         if not st.session_state.edit_city.strip(): errs.append("City를 입력하세요.")
                         if not validate_state(st.session_state.edit_state): errs.append("State는 2글자여야 합니다.")
                         if not validate_zip(st.session_state.edit_zip): errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
+
+                        cs = load_clients()
+                        dup_list = find_duplicates(cs, st.session_state.edit_email, st.session_state.edit_phone, exclude_id=client["id"])
+                        if dup_list and not allow_dup_edit:
+                            errs.append("이미 동일 Email 또는 Phone을 가진 클라이언트가 존재합니다. (아래 표 참고)")
+
                         if errs:
                             st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
+                            if dup_list:
+                                st.dataframe(pd.DataFrame(dup_list), use_container_width=True, hide_index=True)
                         else:
-                            cs = load_clients(); c = get_client(cs, client["id"]) or {}
+                            c = get_client(cs, client["id"]) or {}
                             c["first"] = st.session_state.edit_first.strip()
                             c["last"]  = st.session_state.edit_last.strip()
                             c["email"] = st.session_state.edit_email.strip()
@@ -387,10 +527,19 @@ with TAB2:
                             delete_client_and_data(client["id"])
                             st.session_state.selected_client_id = None
                             st.success("삭제되었습니다."); st.rerun()
+
+        # 전체 클라이언트 CSV 다운로드
+        st.markdown("---")
+        df_all = pd.DataFrame(load_clients())
+        if not df_all.empty:
+            buf = io.StringIO(); df_all.to_csv(buf, index=False)
+            st.download_button("📥 전체 클라이언트 목록 (CSV)", data=buf.getvalue().encode("utf-8"),
+                               file_name="clients.csv", mime="text/csv")
+
     else:
         st.info("등록된 클라이언트가 없습니다. ‘신규 등록’ 탭에서 먼저 등록하세요.")
 
-# -------- TAB 3: 재무 입력 (표 직접 편집 + 편의 기능) --------
+# -------- TAB 3: 재무 입력 (표 직접 편집 + 편의 기능 + 자동 저장) --------
 with TAB3:
     st.subheader("2) 재무 입력 (클라이언트별 저장)")
     sel_id = st.session_state.selected_client_id
@@ -409,25 +558,26 @@ with TAB3:
         }
 
         def _df_from_rows(section_key: str, rows: list) -> pd.DataFrame:
+            # date는 문자열(YYYY-MM-DD) 또는 None
             if section_key in ("income_details","expense_details"):
-                return pd.DataFrame(rows, columns=["category","desc","amount"])
-            return pd.DataFrame(rows, columns=["category","amount"])
+                return pd.DataFrame(rows, columns=["category","desc","amount","date"])
+            return pd.DataFrame(rows, columns=["category","amount","date"])
 
         def _empty_row(section_key: str) -> dict:
             if section_key in ("income_details","expense_details"):
-                return {"category":"", "desc":"", "amount":0.0}
-            return {"category":"", "amount":0.0}
+                return {"category":"", "desc":"", "amount":0.0, "date": today_iso_date()}
+            return {"category":"", "amount":0.0, "date": today_iso_date()}
 
         def get_working_df(section_key: str) -> pd.DataFrame:
             sskey = f"{section_key}_working_{sel_id}"
             if sskey not in st.session_state:
                 st.session_state[sskey] = _df_from_rows(section_key, finance.get(section_key, []))
-            # 방어: 컬럼 보정
             df = st.session_state[sskey]
-            need_cols = ["category","amount"] if section_key not in ("income_details","expense_details") else ["category","desc","amount"]
+            need_cols = ["category","amount","date"] if section_key not in ("income_details","expense_details") else ["category","desc","amount","date"]
             for c in need_cols:
                 if c not in df.columns:
-                    df[c] = "" if c != "amount" else 0.0
+                    df[c] = today_iso_date() if c == "date" else (0.0 if c == "amount" else "")
+            # 정렬 컬럼 고정
             st.session_state[sskey] = df[need_cols]
             return st.session_state[sskey]
 
@@ -435,10 +585,49 @@ with TAB3:
             sskey = f"{section_key}_working_{sel_id}"
             st.session_state[sskey] = df.copy()
 
+        def _clean_and_validate_df(title: str, edited: pd.DataFrame, has_desc: bool):
+            errs = []
+            clean_rows = []
+            if isinstance(edited, pd.Series):
+                edited = edited.to_frame().T
+            fillmap = {"category": "", "date": today_iso_date()}
+            if has_desc:
+                fillmap["desc"] = ""
+            ed = edited.fillna(fillmap)
+            for i, r in ed.iterrows():
+                cat = str(r.get("category", "")).strip()
+                if cat == "":
+                    continue
+                # amount
+                try:
+                    amt = float(r.get("amount", 0))
+                    if amt < 0:
+                        errs.append(f"{title} 행 {i}: Amount는 0 이상이어야 합니다.")
+                        continue
+                except Exception:
+                    errs.append(f"{title} 행 {i}: Amount가 올바르지 않습니다.")
+                    continue
+                # date (YYYY-MM-DD) 허용, 잘못되면 오늘자로
+                d = str(r.get("date") or "").strip()
+                try:
+                    # pandas 로 변환 가능 여부 체크
+                    dt = pd.to_datetime(d).date() if d else date.today()
+                    d_str = dt.isoformat()
+                except Exception:
+                    d_str = today_iso_date()
+
+                row = {"category": cat, "amount": amt, "date": d_str}
+                if has_desc:
+                    row["desc"] = str(r.get("desc", "")).strip()
+                clean_rows.append(row)
+            return clean_rows, errs
+
+        def _rows_equal(a: list, b: list) -> bool:
+            return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
         def editor_section(title: str, section_key: str, has_desc: bool, key_prefix: str):
             st.markdown(f"### {title}")
 
-            # 좌측: 프리셋 / 빠른 입력 / 편의 버튼
             lcol, rcol = st.columns([1, 3])
 
             with lcol:
@@ -448,33 +637,31 @@ with TAB3:
                 if st.button("프리셋 행 추가", key=f"{key_prefix}_addpreset_{sel_id}"):
                     df = get_working_df(section_key)
                     for p in preset_sel:
-                        row = {"category": p, "amount": 0.0}
-                        if has_desc: row["desc"] = ""
+                        row = _empty_row(section_key); row["category"] = p
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                     set_working_df(section_key, df)
-                    st.success("프리셋을 추가했습니다.")
-                    st.rerun()
+                    st.success("프리셋을 추가했습니다."); st.rerun()
 
                 st.divider()
                 st.caption("빠른 입력")
                 q_cat = st.selectbox("Category", options=[""] + PRESETS.get(section_key, []), key=f"{key_prefix}_quick_cat_{sel_id}")
                 q_desc = st.text_input("Description", key=f"{key_prefix}_quick_desc_{sel_id}") if has_desc else ""
                 q_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{key_prefix}_quick_amt_{sel_id}")
+                q_date = st.date_input("Date", value=date.today(), key=f"{key_prefix}_quick_date_{sel_id}")
                 if st.button("➕ 한 행 추가", key=f"{key_prefix}_quick_add_{sel_id}"):
                     if (q_cat or "").strip() == "":
                         st.warning("Category를 선택하세요.")
                     else:
                         df = get_working_df(section_key)
-                        row = {"category": q_cat.strip(), "amount": float(q_amt)}
+                        row = {"category": q_cat.strip(), "amount": float(q_amt), "date": q_date.isoformat()}
                         if has_desc: row["desc"] = (q_desc or "").strip()
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                         set_working_df(section_key, df)
-                        # 입력칸 초기화
                         st.session_state[f"{key_prefix}_quick_cat_{sel_id}"] = ""
                         if has_desc: st.session_state[f"{key_prefix}_quick_desc_{sel_id}"] = ""
                         st.session_state[f"{key_prefix}_quick_amt_{sel_id}"] = 0.0
-                        st.success("추가되었습니다.")
-                        st.rerun()
+                        st.session_state[f"{key_prefix}_quick_date_{sel_id}"] = date.today()
+                        st.success("추가되었습니다."); st.rerun()
 
                 st.divider()
                 st.caption("기타")
@@ -498,12 +685,12 @@ with TAB3:
                     st.info("저장 전 상태로 되돌렸습니다."); st.rerun()
 
             with rcol:
-                # 편집 테이블
                 df = get_working_df(section_key)
 
                 col_cfg = {
                     "category": st.column_config.TextColumn("Category", required=True, help="필수"),
                     "amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=100.0, format="%.2f"),
+                    "date": st.column_config.DateColumn("Date"),
                 }
                 if has_desc:
                     col_cfg["desc"] = st.column_config.TextColumn("Description")
@@ -517,7 +704,6 @@ with TAB3:
                     column_config=col_cfg,
                 )
 
-                # 에디터 결과를 워킹 DF로 반영
                 if isinstance(edited, pd.Series):
                     edited = edited.to_frame().T
                 set_working_df(section_key, edited)
@@ -529,39 +715,28 @@ with TAB3:
                     sec_sum = 0.0
                 st.caption(f"섹션 합계: ${sec_sum:,.2f}")
 
-                # 저장 버튼
+                # ====== 자동 저장 처리 ======
+                if st.session_state.autosave:
+                    clean_rows, errs = _clean_and_validate_df(title, edited, has_desc)
+                    # 저장 대상 데이터와 기존 저장 데이터 비교
+                    if not errs and not _rows_equal(clean_rows, finance.get(section_key, [])):
+                        finance[section_key] = clean_rows
+                        save_client_finance(sel_id, finance)
+                        set_working_df(section_key, _df_from_rows(section_key, clean_rows))
+                        st.success("자동 저장 완료")
+                    elif errs:
+                        st.warning("자동 저장 보류: " + "; ".join(errs))
+
+                # 수동 저장 버튼
                 if st.button("변경 사항 저장", key=f"{key_prefix}_save_{sel_id}"):
-                    errs = []
-                    clean_rows = []
-                    ed = edited.fillna({"category": "", "desc": ""}) if has_desc else edited.fillna({"category": ""})
-                    for i, r in ed.iterrows():
-                        cat = str(r.get("category", "")).strip()
-                        if cat == "":
-                            # 완전 공행/카테고리 없는 행은 스킵
-                            continue
-                        try:
-                            amt = float(r.get("amount", 0))
-                            if amt < 0:
-                                errs.append(f"{title} 행 {i}: Amount는 0 이상이어야 합니다.")
-                                continue
-                        except Exception:
-                            errs.append(f"{title} 행 {i}: Amount가 올바르지 않습니다.")
-                            continue
-
-                        row = {"category": cat, "amount": amt}
-                        if has_desc:
-                            row["desc"] = str(r.get("desc", "")).strip()
-                        clean_rows.append(row)
-
+                    clean_rows, errs = _clean_and_validate_df(title, edited, has_desc)
                     if errs:
                         st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>", unsafe_allow_html=True)
                     else:
                         finance[section_key] = clean_rows
                         save_client_finance(sel_id, finance)
-                        # 저장 후, 워킹 DF는 새로 로드한 값으로 갱신
                         set_working_df(section_key, _df_from_rows(section_key, clean_rows))
-                        st.success("저장되었습니다.")
-                        st.rerun()
+                        st.success("저장되었습니다."); st.rerun()
 
             st.markdown("---")
 
@@ -580,10 +755,9 @@ with TAB3:
             finance.setdefault("summary", {})["etc"] = float(new_etc)
             save_client_finance(sel_id, finance)
             st.session_state.pop(etc_key, None)
-            st.success("저장되었습니다.")
-            st.rerun()
+            st.success("저장되었습니다."); st.rerun()
 
-        # Quick summary
+        # Quick summary (all-time)
         income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
         expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
         remaining = max(income_sum - expense_sum, 0.0)
@@ -594,7 +768,7 @@ with TAB3:
         c3.metric("Remaining", f"${remaining:,.2f}")
         c4.metric("Etc", f"${etc_val:,.2f}")
 
-# -------- TAB 4: 시각화 --------
+# -------- TAB 4: 시각화 (기간 필터 적용) --------
 with TAB4:
     st.subheader("4) 시각화 (파이 그래프)")
     sel_id = st.session_state.selected_client_id
@@ -603,12 +777,61 @@ with TAB4:
     else:
         finance = load_client_finance(sel_id)
 
+        # ===== 기간 필터 UI =====
         st.sidebar.markdown("### 그래프 설정")
         pie_size = st.sidebar.slider("파이 크기 (inches)", 4, 12, 6)
         title_fs = st.sidebar.slider("제목 글씨 크기", 12, 32, 18)
         pct_fs   = st.sidebar.slider("퍼센트 글씨 크기", 8, 18, 12)
         pct_dist = st.sidebar.slider("퍼센트 위치 (중심→가장자리)", 0.4, 1.2, 0.7)
 
+        st.sidebar.markdown("### 기간 필터")
+        period = st.sidebar.selectbox("기간", ["전체", "이번 달", "올해", "직접 범위"])
+        start_date = None
+        end_date = None
+        if period == "이번 달":
+            today = date.today()
+            start_date = date(today.year, today.month, 1)
+            # 다음달 1일 - 1일
+            if today.month == 12:
+                end_date = date(today.year+1, 1, 1)
+            else:
+                end_date = date(today.year, today.month+1, 1)
+        elif period == "올해":
+            today = date.today()
+            start_date = date(today.year, 1, 1)
+            end_date = date(today.year+1, 1, 1)
+        elif period == "직접 범위":
+            c1, c2 = st.sidebar.columns(2)
+            with c1:
+                start_date = st.sidebar.date_input("시작일", value=date.today().replace(month=1, day=1))
+            with c2:
+                end_date = st.sidebar.date_input("종료일(포함)", value=date.today())
+                # 내부 계산은 exclusive end로 사용 → +1일
+                end_date = end_date + pd.Timedelta(days=1)
+
+        # ===== 필터링 함수 =====
+        def filter_rows(rows: list) -> list:
+            if period == "전체":
+                return rows
+            filtered = []
+            for r in rows:
+                d = r.get("date")
+                if not d:
+                    # 날짜가 없으면 "전체"에서만 포함 → 기간 필터에서는 제외
+                    continue
+                try:
+                    dt = pd.to_datetime(d).date()
+                except Exception:
+                    continue
+                # end_date는 exclusive
+                if start_date and end_date:
+                    if start_date <= dt < end_date:
+                        filtered.append(r)
+                else:
+                    filtered.append(r)
+            return filtered
+
+        # ===== 차트 그리기 =====
         def draw_pie(values: list[float], labels_for_legend: list[str], title: str):
             vals, leg = zip(*[(v,l) for v,l in zip(values, labels_for_legend) if v > 0]) if any(values) else ([],[])
             fig, ax = plt.subplots(figsize=(pie_size, pie_size))
@@ -630,27 +853,36 @@ with TAB4:
                 ax.set_title(title, fontsize=title_fs)
                 st.pyplot(fig, use_container_width=True)
 
-        income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
-        expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
+        # 1) Income/Expense Mix (기간 필터 적용)
+        inc_rows = filter_rows(finance.get("income_details", []))
+        exp_rows = filter_rows(finance.get("expense_details", []))
+        income_sum = float(sum(x.get("amount", 0.0) for x in inc_rows))
+        expense_sum = float(sum(x.get("amount", 0.0) for x in exp_rows))
         remaining = max(income_sum - expense_sum, 0.0)
-        etc_val = float(finance.get("summary", {}).get("etc", 0.0))
+        etc_val = float(finance.get("summary", {}).get("etc", 0.0))  # Etc는 기간 필터 미적용(설정값)
         draw_pie([income_sum, expense_sum, remaining, etc_val], ["Income","Expense","Remaining","Etc"], "Income / Expense Mix")
 
         st.markdown("---")
-        assets = finance.get("assets", [])
+
+        # 2) Assets by Category (기간 필터 적용)
+        assets = filter_rows(finance.get("assets", []))
         if assets:
-            df = pd.DataFrame(assets); g = df.groupby("category", dropna=False)["amount"].sum().reset_index()
-            draw_pie(g["amount"].tolist(), g["category"].astype(str).tolist(), "Assets by Category")
+            df = pd.DataFrame(assets)
+            grouped = df.groupby("category", dropna=False)["amount"].sum().reset_index()
+            draw_pie(grouped["amount"].tolist(), grouped["category"].astype(str).tolist(), "Assets by Category")
         else:
-            st.info("자산 항목이 없습니다.")
+            st.info("자산 항목이 없습니다(선택한 기간 내).")
 
         st.markdown("---")
-        liabs = finance.get("liabilities", [])
+
+        # 3) Liabilities by Category (기간 필터 적용)
+        liabs = filter_rows(finance.get("liabilities", []))
         if liabs:
-            df = pd.DataFrame(liabs); g = df.groupby("category", dropna=False)["amount"].sum().reset_index()
-            draw_pie(g["amount"].tolist(), g["category"].astype(str).tolist(), "Liabilities by Category")
+            df = pd.DataFrame(liabs)
+            grouped = df.groupby("category", dropna=False)["amount"].sum().reset_index()
+            draw_pie(grouped["amount"].tolist(), grouped["category"].astype(str).tolist(), "Liabilities by Category")
         else:
-            st.info("부채 항목이 없습니다.")
+            st.info("부채 항목이 없습니다(선택한 기간 내).")
 
 # =====================
 # Footer
