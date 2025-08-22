@@ -1,469 +1,449 @@
-# app.py  — PFC App (v1.x)
-# 전체 코드: 클라이언트 관리(리스트/선택, 신규 등록, 수정/삭제) + 재무 입력(Income/Expense/Assets/Liabilities) + 실시간 요약
-# 주요 변경점:
-# - "등록" 버튼 항상 활성화, 제출 시에만 유효성 검사/포맷 적용
-# - 전화번호 000-000-0000 포맷으로 저장 (입력 시 제한X, 저장 전에 포맷/검증)
-# - 이메일 형식 검사, Apt 칸 Optional
-# - 등록/리스트/수정 통합, 리스트에서 선택 → 프로필 보여주고 수정/삭제 가능
-# - 선택된 클라이언트 기준으로 실시간 요약 반영
+# app.py  — PFC v1 (clients + income/expense/assets/liabilities + charts)
+# 한국어 UI / 파일형 스토리지(JSON) / 세션 안정화 / 입력 검증 / 전화번호 자동 포맷
 
-import re
-import math
-import pandas as pd
+import os, re, json, uuid
+from typing import Dict, Any, List
+from datetime import datetime
+
 import numpy as np
+import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 
-# -----------------------------
-# 유틸 함수
-# -----------------------------
-def fmt_phone(raw: str) -> str:
-    """숫자만 추출 후 10자리면 000-000-0000 형태로 반환, 아니면 원본 유지"""
-    if not raw:
-        return ""
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 10:
-        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}"
-    return raw.strip()
+# ---------- 기본 설정 ----------
+st.set_page_config(page_title="Personal Finance Checkup", layout="wide")
 
-def valid_email(email: str) -> bool:
-    if not email:
-        return False
-    # 간단/안전한 패턴
-    pat = r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
-    return re.match(pat, email.strip()) is not None
+DATA_DIR = "data"
+CLIENTS_FILE = os.path.join(DATA_DIR, "clients.json")
 
-def build_full_address(street: str, apt: str, city: str, state: str, zipc: str) -> str:
-    parts = []
-    s = (street or "").strip()
-    a = (apt or "").strip()
-    c = (city or "").strip()
-    t = (state or "").strip()
-    z = (zipc or "").strip()
-    if s:
-        if a:
-            parts.append(f"{s} {a}")
-        else:
-            parts.append(s)
-    # City, State Zip
-    line2 = " ".join([c, f"{t} {z}".strip()]).strip()
-    if line2:
-        parts.append(line2)
-    return ", ".join(parts)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-def money(x) -> float:
+# ---------- 유틸 ----------
+def load_json(path:str, default):
+    if not os.path.exists(path):
+        return default
     try:
-        return float(x)
-    except:
-        return 0.0
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
-# -----------------------------
-# 초기 상태
-# -----------------------------
-def init_state():
-    ss = st.session_state
-    if "clients_df" not in ss:
-        ss.clients_df = pd.DataFrame(
-            columns=[
-                "id","first_name","last_name","name","email","phone",
-                "street","apt","city","state","zip","home_address","notes"
-            ]
-        )
-    if "next_client_id" not in ss:
-        ss.next_client_id = 1
+def save_json(path:str, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
 
-    # client_books: client_id -> dict of dfs
-    if "client_books" not in ss:
-        ss.client_books = {}
+def get_clients() -> List[Dict[str,Any]]:
+    return load_json(CLIENTS_FILE, [])
 
-    if "selected_client_id" not in ss:
-        ss.selected_client_id = None
+def save_clients(clients: List[Dict[str,Any]]):
+    save_json(CLIENTS_FILE, clients)
 
-init_state()
+def client_file(client_id:str) -> str:
+    return os.path.join(DATA_DIR, f"client_{client_id}.json")
 
-def ensure_client_book(cid: int):
-    books = st.session_state.client_books
-    if cid not in books:
-        books[cid] = {
-            "income": pd.DataFrame(columns=["Category","Description","Amount"]),
-            "expense": pd.DataFrame(columns=["Category","Description","Amount"]),
-            "assets":  pd.DataFrame(columns=["Category","Amount"]),
-            "liab":    pd.DataFrame(columns=["Category","Amount"])
-        }
+def load_client_data(client_id:str) -> Dict[str,Any]:
+    path = client_file(client_id)
+    default = {
+        "income_details": [],      # [{category, desc, amount}]
+        "expense_details": [],     # [{category, desc, amount}]
+        "assets": [],              # [{category, amount}]
+        "liabilities": [],         # [{category, amount}]
+        "summary": {"etc": 0.0}
+    }
+    return load_json(path, default)
 
-# -----------------------------
-# 상단 타이틀 & 파일 (선택)
-# -----------------------------
-st.set_page_config(page_title="PFC", layout="wide")
-st.title("📊 Personal Finance Checkup (v1)")
+def save_client_data(client_id:str, data:Dict[str,Any]):
+    save_json(client_file(client_id), data)
 
-# -----------------------------
-# 실시간 요약 (선택된 클라이언트 기준)
-# -----------------------------
-def render_top_metrics():
-    cid = st.session_state.selected_client_id
-    c1,c2,c3,c4 = st.columns(4)
-    if cid is None or cid not in st.session_state.client_books:
-        with c1: st.metric("Income", "0.00")
-        with c2: st.metric("Expense", "0.00")
-        with c3: st.metric("Remaining", "0.00")
-        with c4: st.metric("Etc", "0.00")
+def join_address(street, unit, city, state, zipc):
+    parts = [street.strip()]
+    if unit.strip():
+        parts.append(unit.strip())
+    tail = ", ".join([s for s in [city.strip(), state.strip()] if s])
+    if tail:
+        parts.append(tail)
+    if str(zipc).strip():
+        parts.append(str(zipc).strip())
+    return " ".join(parts).replace("  ", " ").strip()
+
+# ---------- 검증 ----------
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+ZIP_RE   = re.compile(r"^\d{5}(-\d{4})?$")
+
+def only_digits(s:str) -> str:
+    return re.sub(r"\D+", "", s or "")
+
+def format_phone_10(s:str) -> str:
+    d = only_digits(s)
+    d = d[:10]  # 최대 10자리
+    if len(d) >= 7:
+        return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+    elif len(d) >= 4:
+        return f"{d[:3]}-{d[3:]}"
+    else:
+        return d
+
+def valid_phone_10(s:str) -> bool:
+    return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", s))
+
+# ---------- 세션 초기화 ----------
+def init_session():
+    keys = {
+        "active_client_id": "",
+        # 신규 등록용
+        "new_first": "", "new_last": "", "new_phone": "", "new_email": "",
+        "new_street": "", "new_unit": "", "new_city": "",
+        "new_state": "", "new_zip": "", "new_notes": "",
+        # 입력 탭 공용(초기화/자동 포커스 용)
+        "focus_after_add": ""
+    }
+    for k,v in keys.items():
+        st.session_state.setdefault(k, v)
+
+init_session()
+
+# 전화번호 자동 포맷(폼 밖에서 항상 한 번 적용)
+if st.session_state.get("new_phone"):
+    st.session_state.new_phone = format_phone_10(st.session_state.new_phone)
+
+# ---------- 헤더 ----------
+st.markdown("## 📊 Personal Finance Checkup (v1)")
+
+# ---------- 상단 실시간 요약 (선택된 클라이언트 기준) ----------
+def render_realtime_summary(client_id:str):
+    left, mid1, mid2, right = st.columns([1,1,1,1])
+    if not client_id:
+        with left:    st.metric("Income", "0.00")
+        with mid1:    st.metric("Expense", "0.00")
+        with mid2:    st.metric("Remaining", "0.00")
+        with right:   st.metric("Etc", "0.00")
         return
 
-    book = st.session_state.client_books[cid]
-    inc = book["income"]["Amount"].map(money).sum() if not book["income"].empty else 0.0
-    exp = book["expense"]["Amount"].map(money).sum() if not book["expense"].empty else 0.0
-    etc = 0.0  # 추후 별도 필드 필요 시 연결
-    rem = inc - exp + etc
+    data = load_client_data(client_id)
+    income = sum([x["amount"] for x in data["income_details"]]) if data["income_details"] else 0.0
+    expense = sum([x["amount"] for x in data["expense_details"]]) if data["expense_details"] else 0.0
+    remaining = max(income - expense, 0.0)
+    etc = float(data.get("summary",{}).get("etc", 0.0))
 
-    with c1: st.metric("Income", f"{inc:,.2f}")
-    with c2: st.metric("Expense", f"{exp:,.2f}")
-    with c3: st.metric("Remaining", f"{rem:,.2f}")
-    with c4: st.metric("Etc", f"{etc:,.2f}")
+    with left:  st.metric("Income", f"{income:,.2f}")
+    with mid1:  st.metric("Expense", f"{expense:,.2f}")
+    with mid2:  st.metric("Remaining", f"{remaining:,.2f}")
+    with right: st.metric("Etc", f"{etc:,.2f}")
 
-render_top_metrics()
-st.markdown("---")
+# ---------- 클라이언트 관리 ----------
+st.markdown("### 👥 클라이언트")
 
-# -----------------------------
-# 클라이언트 관리 영역
-# -----------------------------
-st.header("👥 클라이언트 선택 / 관리")
+tab_list, tab_new, tab_profile = st.tabs(["리스트/선택", "신규 등록", "프로필 수정"])
 
-tab_list, tab_new = st.tabs(["리스트/선택", "신규 등록"])
-
-# == 리스트/선택 탭 ==
 with tab_list:
-    st.subheader("등록된 클라이언트")
-
-    # 표출 표
-    if st.session_state.clients_df.empty:
-        st.info("등록된 클라이언트가 없습니다.")
-    else:
-        show_cols = ["id","name","email","phone","home_address"]
-        st.dataframe(
-            st.session_state.clients_df[show_cols].sort_values("id").set_index("id"),
-            use_container_width=True,
-            height=280
-        )
+    st.caption("등록된 클라이언트")
+    clients = get_clients()
+    df_clients = pd.DataFrame(clients) if clients else pd.DataFrame(columns=["id","first","last","email","phone","home_address"])
+    st.dataframe(df_clients[["id","first","last","email","phone","home_address"]], use_container_width=True, hide_index=True)
 
     # 선택
-    all_options = []
-    for _, r in st.session_state.clients_df.sort_values("id").iterrows():
-        label = f'{r["name"]} — {r["email"]} ({r["id"]})'
-        all_options.append((label, int(r["id"])))
-    opt_labels = [o[0] for o in all_options]
-    opt_values = [o[1] for o in all_options]
-
-    sel = st.selectbox("클라이언트 선택", options=[None]+opt_values, format_func=lambda v: "선택하세요" if v is None else [l for l,val in all_options if val==v][0], key="sel_client_for_work")
-    if sel is not None:
-        st.session_state.selected_client_id = int(sel)
-        ensure_client_book(int(sel))
+    options = {f'{c["first"]} {c["last"]} — {c["email"]} ({c["phone"]})': c["id"] for c in clients}
+    chosen = st.selectbox("클라이언트 선택", [""] + list(options.keys()), index=0)
+    if chosen:
+        st.session_state.active_client_id = options[chosen]
         st.success("선택되었습니다. 아래에서 입력을 진행하세요.")
+    else:
+        st.session_state.active_client_id = ""
 
-        # 선택된 클라이언트 프로필/수정/삭제
-        st.markdown("### 프로필 보기/수정")
-        dfc = st.session_state.clients_df
-        row = dfc.loc[dfc["id"]==sel].iloc[0]
+    # 삭제
+    with st.expander("선택한 클라이언트 삭제"):
+        if st.session_state.active_client_id:
+            if st.warning("삭제 시 해당 클라이언트의 모든 재무 데이터가 함께 삭제됩니다. 되돌릴 수 없습니다.", icon="⚠️"):
+                if st.button("영구 삭제", type="primary"):
+                    cid = st.session_state.active_client_id
+                    # clients 목록에서 제거
+                    new_list = [c for c in clients if c["id"] != cid]
+                    save_clients(new_list)
+                    # 데이터 파일 삭제
+                    p = client_file(cid)
+                    if os.path.exists(p):
+                        os.remove(p)
+                    st.session_state.active_client_id = ""
+                    st.success("삭제 완료.")
+                    st.experimental_rerun()
+        else:
+            st.info("먼저 클라이언트를 선택하세요.")
 
-        with st.form("edit_profile"):
-            c1,c2 = st.columns(2)
-            with c1:
-                e_first = st.text_input("First Name", value=row["first_name"])
-            with c2:
-                e_last  = st.text_input("Last Name", value=row["last_name"])
-            e_phone = st.text_input("Phone Number", value=row["phone"], placeholder="000-000-0000")
-            e_email = st.text_input("Email", value=row["email"], placeholder="name@example.com")
+    st.markdown("---")
+    st.subheader("📌 실시간 요약")
+    render_realtime_summary(st.session_state.active_client_id)
+
+with tab_new:
+    st.caption("※ *Apt/Unit#*는 선택 입력, 이메일/전화/우편번호는 형식 검사를 통과해야 등록됩니다.")
+
+    # 필드
+    colA, colB = st.columns(2)
+    with colA:
+        st.session_state.new_first = st.text_input("First Name", value=st.session_state.new_first, key="new_first_key")
+    with colB:
+        st.session_state.new_last  = st.text_input("Last Name",  value=st.session_state.new_last,  key="new_last_key")
+
+    colP, colE = st.columns(2)
+    with colP:
+        st.session_state.new_phone = st.text_input("Phone Number", value=st.session_state.new_phone or "", placeholder="000-000-0000", key="new_phone_key")
+        # 즉시 포맷 반영
+        st.session_state.new_phone = format_phone_10(st.session_state.new_phone)
+        if st.session_state.new_phone and not valid_phone_10(st.session_state.new_phone):
+            st.caption(":red[형식: 000-000-0000]")
+
+    with colE:
+        st.session_state.new_email = st.text_input("Email", value=st.session_state.new_email, key="new_email_key")
+        if st.session_state.new_email and not EMAIL_RE.match(st.session_state.new_email):
+            st.caption(":red[유효한 이메일 주소가 아닙니다]")
+
+    st.markdown("**Home address**")
+    st.session_state.new_street = st.text_input("Street Address", value=st.session_state.new_street, key="new_street_key")
+    st.session_state.new_unit   = st.text_input("Ste/Apt/Unit# (Optional)", value=st.session_state.new_unit, key="new_unit_key")
+
+    colC, colS, colZ = st.columns([1,1,1])
+    with colC:
+        st.session_state.new_city  = st.text_input("City",  value=st.session_state.new_city, key="new_city_key")
+    with colS:
+        st.session_state.new_state = st.text_input("State", value=st.session_state.new_state, key="new_state_key")
+    with colZ:
+        st.session_state.new_zip   = st.text_input("Zip Code", value=st.session_state.new_zip, key="new_zip_key")
+        if st.session_state.new_zip and not ZIP_RE.match(st.session_state.new_zip):
+            st.caption(":red[형식: 5자리 또는 5-4자리]")
+
+    st.session_state.new_notes = st.text_area("Notes", value=st.session_state.new_notes, key="new_notes_key")
+
+    # 검증
+    req_ok = all([
+        st.session_state.new_first.strip(),
+        st.session_state.new_last.strip(),
+        EMAIL_RE.match(st.session_state.new_email or "") is not None,
+        valid_phone_10(st.session_state.new_phone or ""),
+        st.session_state.new_street.strip(),
+        st.session_state.new_city.strip(),
+        st.session_state.new_state.strip(),
+        ZIP_RE.match(st.session_state.new_zip or "") is not None
+    ])
+
+    btn = st.button("등록", type="primary", disabled=not req_ok)
+    if btn:
+        clients = get_clients()
+        cid = str(uuid.uuid4())[:12]
+
+        full_addr = join_address(
+            st.session_state.new_street,
+            st.session_state.new_unit,
+            st.session_state.new_city,
+            st.session_state.new_state,
+            st.session_state.new_zip
+        )
+
+        new_client = {
+            "id": cid,
+            "first": st.session_state.new_first.strip(),
+            "last":  st.session_state.new_last.strip(),
+            "email": st.session_state.new_email.strip(),
+            "phone": st.session_state.new_phone.strip(),
+            "home_address": full_addr,
+            "notes": st.session_state.new_notes.strip(),
+            "created_at": datetime.now().isoformat()
+        }
+        clients.append(new_client)
+        save_clients(clients)
+
+        # 개인 재무 데이터 빈 껍데기 생성
+        save_client_data(cid, load_client_data(cid))
+
+        # 입력 필드 초기화
+        st.session_state.update({
+            "new_first":"", "new_last":"", "new_phone":"", "new_email":"",
+            "new_street":"", "new_unit":"", "new_city":"", "new_state":"", "new_zip":"",
+            "new_notes":""
+        })
+        st.success("등록 완료! 리스트에서 선택 후 재무 입력을 진행해 주세요.")
+        st.experimental_rerun()
+
+with tab_profile:
+    st.caption("리스트/선택 탭에서 클라이언트를 고른 뒤 이곳에서 프로필을 수정/저장할 수 있습니다.")
+    cid = st.session_state.active_client_id
+    if not cid:
+        st.info("먼저 클라이언트를 선택하세요.")
+    else:
+        clients = get_clients()
+        cur = next((c for c in clients if c["id"]==cid), None)
+        if not cur:
+            st.error("클라이언트를 찾을 수 없습니다.")
+        else:
+            st.subheader(f"프로필 수정 — {cur['first']} {cur['last']}")
+            # 편집 필드
+            cA, cB = st.columns(2)
+            with cA:
+                first = st.text_input("First Name", cur["first"])
+            with cB:
+                last  = st.text_input("Last Name", cur["last"])
+
+            pE, pP = st.columns(2)
+            with pE:
+                email = st.text_input("Email", cur["email"])
+            with pP:
+                phone = st.text_input("Phone Number", cur["phone"], placeholder="000-000-0000")
+                phone = format_phone_10(phone)
 
             st.markdown("**Home address**")
-            s1 = st.text_input("Street Address", value=row["street"])
-            s2 = st.text_input("Ste#/Apt#/Unit# (Optional)", value=row["apt"])
-            cc, ss, zz = st.columns([1,0.6,0.8])
-            with cc: city = st.text_input("City", value=row["city"])
-            with ss: state = st.text_input("State", value=row["state"], max_chars=2)
-            with zz: zipc  = st.text_input("Zip Code", value=row["zip"])
-            notes = st.text_area("Notes", value=row["notes"], height=90)
+            st_addr = st.text_input("Street Address", cur.get("home_address",""))
+            notes   = st.text_area("Notes", cur.get("notes",""))
 
-            c_upd, c_del = st.columns([3,1])
-            with c_upd:
-                update = st.form_submit_button("프로필 저장", use_container_width=True)
-            with c_del:
-                delete = st.form_submit_button("삭제", use_container_width=True)
+            ok = True
+            if email and not EMAIL_RE.match(email): 
+                st.caption(":red[이메일 형식이 올바르지 않습니다]"); ok=False
+            if phone and not valid_phone_10(phone):
+                st.caption(":red[전화번호 형식: 000-000-0000]"); ok=False
 
-            if update:
-                errs=[]
-                if not e_first.strip(): errs.append("First Name을 입력하세요.")
-                if not e_last.strip():  errs.append("Last Name을 입력하세요.")
-                if not valid_email(e_email): errs.append("이메일 형식이 올바르지 않습니다.")
+            save_btn = st.button("프로필 저장", disabled=not ok)
+            if save_btn and ok:
+                cur["first"], cur["last"], cur["email"], cur["phone"] = first.strip(), last.strip(), email.strip(), phone.strip()
+                cur["home_address"] = st_addr.strip()
+                cur["notes"] = notes.strip()
+                save_clients(clients)
+                st.success("저장되었습니다.")
+                st.experimental_rerun()
 
-                digits = re.sub(r"\D","", e_phone or "")
-                if len(digits)!=10: errs.append("전화번호는 10자리(예: 224-829-2014)여야 합니다.")
-                phone_fmt = fmt_phone(e_phone)
-
-                if not s1.strip(): errs.append("Street Address를 입력하세요.")
-                if not city.strip(): errs.append("City를 입력하세요.")
-                if not state.strip() or len(state.strip())!=2: errs.append("State는 2글자 약어로 입력하세요.")
-                if not zipc.strip(): errs.append("Zip Code를 입력하세요.")
-
-                if errs:
-                    for m in errs:
-                        st.markdown(f"<small style='color:#ff6b6b'>{m}</small>", unsafe_allow_html=True)
-                else:
-                    home = build_full_address(s1,s2,city,state,zipc)
-                    idx = dfc.index[dfc["id"]==sel][0]
-                    dfc.loc[idx,"first_name"] = e_first.strip()
-                    dfc.loc[idx,"last_name"]  = e_last.strip()
-                    dfc.loc[idx,"name"]       = f"{e_first.strip()} {e_last.strip()}"
-                    dfc.loc[idx,"email"]      = e_email.strip()
-                    dfc.loc[idx,"phone"]      = phone_fmt
-                    dfc.loc[idx,"street"]     = s1.strip()
-                    dfc.loc[idx,"apt"]        = (s2 or "").strip()
-                    dfc.loc[idx,"city"]       = city.strip()
-                    dfc.loc[idx,"state"]      = state.strip()
-                    dfc.loc[idx,"zip"]        = zipc.strip()
-                    dfc.loc[idx,"home_address"]= home
-                    dfc.loc[idx,"notes"]      = (notes or "").strip()
-                    st.success("프로필이 저장되었습니다.")
-                    st.rerun()
-
-            if delete:
-                # 자료와 함께 삭제
-                st.session_state.clients_df = dfc[dfc["id"]!=sel].reset_index(drop=True)
-                if sel in st.session_state.client_books:
-                    del st.session_state.client_books[sel]
-                st.session_state.selected_client_id = None
-                st.warning("클라이언트가 삭제되었습니다.")
-                st.rerun()
-
-# == 신규 등록 탭 ==
-with tab_new:
-    st.subheader("새 클라이언트 등록")
-
-    with st.form("new_client_form", clear_on_submit=False):
-        c1,c2 = st.columns(2)
-        with c1:
-            first_name = st.text_input("First Name", key="new_first")
-        with c2:
-            last_name  = st.text_input("Last Name",  key="new_last")
-
-        # 폼 안에서는 on_change 사용 X → 제출 시 검증/포맷
-        if "new_phone" not in st.session_state:
-            st.session_state.new_phone = ""
-        st.text_input("Phone Number", key="new_phone", placeholder="000-000-0000")
-        email  = st.text_input("Email", key="new_email", placeholder="name@example.com")
-
-        st.markdown("**Home address**")
-        street = st.text_input("Street Address", key="new_street")
-        apt    = st.text_input("Ste#/Apt#/Unit# (Optional)", key="new_apt")
-        c3,c4,c5 = st.columns([1,0.6,0.8])
-        with c3:
-            city  = st.text_input("City", key="new_city")
-        with c4:
-            state = st.text_input("State", key="new_state", max_chars=2)
-        with c5:
-            zipc  = st.text_input("Zip Code", key="new_zip")
-
-        notes = st.text_area("Notes", key="new_notes", height=90)
-
-        submitted = st.form_submit_button("등록", use_container_width=True)
-        if submitted:
-            errors = []
-            if not first_name.strip(): errors.append("First Name을 입력하세요.")
-            if not last_name.strip():  errors.append("Last Name을 입력하세요.")
-            if not valid_email(email): errors.append("이메일 형식이 올바르지 않습니다.")
-
-            digits = re.sub(r"\D","", st.session_state.new_phone or "")
-            if len(digits) != 10:
-                errors.append("전화번호는 10자리(예: 224-829-2014)여야 합니다.")
-            phone_formatted = fmt_phone(st.session_state.new_phone)
-
-            if not street.strip(): errors.append("Street Address를 입력하세요.")
-            if not city.strip():   errors.append("City를 입력하세요.")
-            if not state.strip() or len(state.strip()) != 2:
-                errors.append("State는 2글자 약어로 입력하세요. (예: IL)")
-            if not zipc.strip():   errors.append("Zip Code를 입력하세요.")
-
-            if errors:
-                for m in errors:
-                    st.markdown(f"<small style='color:#ff6b6b'>{m}</small>", unsafe_allow_html=True)
-            else:
-                # 저장
-                cdf = st.session_state.clients_df
-                cid = int(st.session_state.next_client_id)
-                name = f"{first_name.strip()} {last_name.strip()}"
-                home_addr = build_full_address(street, apt, city, state, zipc)
-                row = {
-                    "id": cid,
-                    "first_name": first_name.strip(),
-                    "last_name": last_name.strip(),
-                    "name": name,
-                    "email": email.strip(),
-                    "phone": phone_formatted,
-                    "street": street.strip(),
-                    "apt": (apt or "").strip(),
-                    "city": city.strip(),
-                    "state": state.strip(),
-                    "zip": zipc.strip(),
-                    "home_address": home_addr,
-                    "notes": (notes or "").strip()
-                }
-                st.session_state.clients_df = pd.concat([cdf, pd.DataFrame([row])], ignore_index=True)
-                st.session_state.next_client_id = cid + 1
-                ensure_client_book(cid)
-                st.session_state.selected_client_id = cid
-                st.success("클라이언트가 등록되었습니다.")
-
-                # 입력칸 초기화
-                st.session_state.new_first  = ""
-                st.session_state.new_last   = ""
-                st.session_state.new_phone  = ""
-                st.session_state.new_email  = ""
-                st.session_state.new_street = ""
-                st.session_state.new_apt    = ""
-                st.session_state.new_city   = ""
-                st.session_state.new_state  = ""
-                st.session_state.new_zip    = ""
-                st.session_state.new_notes  = ""
-                st.rerun()
-
+# ---------- 입력 & 관리 (재무 데이터) ----------
 st.markdown("---")
+st.markdown("### ✍️ 입력 & 관리")
+if not st.session_state.active_client_id:
+    st.info("클라이언트를 먼저 선택하세요. (👥 클라이언트 > 리스트/선택)")
+    st.stop()
 
-# -----------------------------
-# 재무 입력 & 관리
-# -----------------------------
-st.header("✍️ 입력 & 관리")
-tabs = st.tabs(["Income 입력", "Expense 입력", "Assets", "Liabilities", "Summary(보기/설정)"])
+cid = st.session_state.active_client_id
+data = load_client_data(cid)
 
-def require_selected_client():
-    cid = st.session_state.selected_client_id
-    if cid is None or cid not in st.session_state.client_books:
-        st.info("먼저 상단에서 클라이언트를 선택(또는 등록)하세요.")
-        return None, None
-    return cid, st.session_state.client_books[cid]
+tab_inc, tab_exp, tab_assets, tab_liab, tab_summary = st.tabs(
+    ["Income 입력", "Expense 입력", "Assets", "Liabilities", "Summary(보기/설정)"]
+)
 
-# ---- Income 입력 ----
-with tabs[0]:
-    cid, book = require_selected_client()
-    if cid is not None:
-        st.subheader("수입 항목 추가")
-        c1,c2,c3 = st.columns([1,1,0.5])
-        with c1: inc_cat = st.text_input("Category", key="inc_cat")
-        with c2: inc_desc= st.text_input("Description", key="inc_desc")
-        with c3: inc_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="inc_amt")
+def add_row(tbl_key:str, row:Dict[str,Any]):
+    data[tbl_key].append(row)
+    save_client_data(cid, data)
 
-        if st.button("추가", key="btn_add_inc"):
-            df = book["income"]
-            new = {"Category":inc_cat.strip(),"Description":inc_desc.strip(),"Amount":inc_amt}
-            book["income"] = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-            st.success("추가 완료!")
-            st.rerun()
+def del_rows(tbl_key:str, idxes:List[int]):
+    keep = [r for i,r in enumerate(data[tbl_key]) if i not in idxes]
+    data[tbl_key] = keep
+    save_client_data(cid, data)
 
-        st.subheader("현재 수입 내역")
-        df_show = book["income"].copy()
-        if df_show.empty:
-            st.info("수입 항목이 없습니다.")
-        else:
-            df_show.index = range(1, len(df_show)+1)
-            st.dataframe(df_show, use_container_width=True)
+with tab_inc:
+    st.subheader("수입 항목 추가")
+    c1, c2, c3 = st.columns([1,2,1])
+    with c1:
+        cat = st.text_input("Category", key="inc_cat")
+    with c2:
+        desc = st.text_input("Description", key="inc_desc")
+    with c3:
+        amt = st.number_input("Amount", min_value=0.0, step=10.0, key="inc_amt")
 
-# ---- Expense 입력 ----
-with tabs[1]:
-    cid, book = require_selected_client()
-    if cid is not None:
-        st.subheader("지출 항목 추가")
-        c1,c2,c3 = st.columns([1,1,0.5])
-        with c1: exp_cat = st.text_input("Category", key="exp_cat")
-        with c2: exp_desc= st.text_input("Description", key="exp_desc")
-        with c3: exp_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="exp_amt")
+    if st.button("추가", key="inc_add_btn", disabled=not bool(cat and amt>0)):
+        add_row("income_details", {"category":cat.strip(), "desc":desc.strip(), "amount":float(amt)})
+        st.session_state.inc_cat = ""; st.session_state.inc_desc=""; st.session_state.inc_amt=0.0
+        st.experimental_rerun()
 
-        if st.button("추가", key="btn_add_exp"):
-            df = book["expense"]
-            new = {"Category":exp_cat.strip(),"Description":exp_desc.strip(),"Amount":exp_amt}
-            book["expense"] = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-            st.success("추가 완료!")
-            st.rerun()
+    st.markdown("현재 수입 내역")
+    df = pd.DataFrame(data["income_details"]) if data["income_details"] else pd.DataFrame(columns=["category","desc","amount"])
+    st.dataframe(df, use_container_width=True)
+    # 실시간 요약 갱신
+    render_realtime_summary(cid)
 
-        st.subheader("현재 지출 내역")
-        df_show = book["expense"].copy()
-        if df_show.empty:
-            st.info("지출 항목이 없습니다.")
-        else:
-            df_show.index = range(1, len(df_show)+1)
-            st.dataframe(df_show, use_container_width=True)
+with tab_exp:
+    st.subheader("지출 항목 추가")
+    c1, c2, c3 = st.columns([1,2,1])
+    with c1:
+        cat = st.text_input("Category", key="exp_cat")
+    with c2:
+        desc = st.text_input("Description", key="exp_desc")
+    with c3:
+        amt = st.number_input("Amount", min_value=0.0, step=10.0, key="exp_amt")
 
-# ---- Assets ----
-with tabs[2]:
-    cid, book = require_selected_client()
-    if cid is not None:
-        st.subheader("자산 편집")
-        # 간단 입력
-        c1,c2 = st.columns([1,0.6])
-        with c1: a_cat = st.text_input("Category", key="ast_cat")
-        with c2: a_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="ast_amt")
-        if st.button("추가", key="btn_add_ast"):
-            df = book["assets"]
-            new = {"Category":a_cat.strip(),"Amount":a_amt}
-            book["assets"] = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-            st.success("추가 완료!")
-            st.rerun()
+    if st.button("추가", key="exp_add_btn", disabled=not bool(cat and amt>0)):
+        add_row("expense_details", {"category":cat.strip(), "desc":desc.strip(), "amount":float(amt)})
+        st.session_state.exp_cat = ""; st.session_state.exp_desc=""; st.session_state.exp_amt=0.0
+        st.experimental_rerun()
 
-        df_show = book["assets"].copy()
-        if df_show.empty:
-            st.info("자산 데이터가 없습니다.")
-        else:
-            df_show.index = range(1, len(df_show)+1)
-            st.dataframe(df_show, use_container_width=True)
+    st.markdown("현재 지출 내역")
+    df = pd.DataFrame(data["expense_details"]) if data["expense_details"] else pd.DataFrame(columns=["category","desc","amount"])
+    st.dataframe(df, use_container_width=True)
+    render_realtime_summary(cid)
 
-# ---- Liabilities ----
-with tabs[3]:
-    cid, book = require_selected_client()
-    if cid is not None:
-        st.subheader("부채 편집")
-        c1,c2 = st.columns([1,0.6])
-        with c1: l_cat = st.text_input("Category", key="lia_cat")
-        with c2: l_amt = st.number_input("Amount", min_value=0.0, step=1.0, key="lia_amt")
-        if st.button("추가", key="btn_add_lia"):
-            df = book["liab"]
-            new = {"Category":l_cat.strip(),"Amount":l_amt}
-            book["liab"] = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-            st.success("추가 완료!")
-            st.rerun()
+with tab_assets:
+    st.subheader("자산 입력")
+    c1, c2 = st.columns([2,1])
+    with c1:
+        cat = st.text_input("Category", key="ast_cat")
+    with c2:
+        amt = st.number_input("Amount", min_value=0.0, step=100.0, key="ast_amt")
 
-        df_show = book["liab"].copy()
-        if df_show.empty:
-            st.info("부채 데이터가 없습니다.")
-        else:
-            df_show.index = range(1, len(df_show)+1)
-            st.dataframe(df_show, use_container_width=True)
+    if st.button("추가", key="ast_add_btn", disabled=not bool(cat and amt>0)):
+        add_row("assets", {"category":cat.strip(), "amount":float(amt)})
+        st.session_state.ast_cat=""; st.session_state.ast_amt=0.0
+        st.experimental_rerun()
 
-# ---- Summary ----
-with tabs[4]:
-    cid, book = require_selected_client()
+    df = pd.DataFrame(data["assets"]) if data["assets"] else pd.DataFrame(columns=["category","amount"])
+    st.dataframe(df, use_container_width=True)
+    render_realtime_summary(cid)
+
+with tab_liab:
+    st.subheader("부채 입력")
+    c1, c2 = st.columns([2,1])
+    with c1:
+        cat = st.text_input("Category", key="liab_cat")
+    with c2:
+        amt = st.number_input("Amount", min_value=0.0, step=100.0, key="liab_amt")
+
+    if st.button("추가", key="liab_add_btn", disabled=not bool(cat and amt>0)):
+        add_row("liabilities", {"category":cat.strip(), "amount":float(amt)})
+        st.session_state.liab_cat=""; st.session_state.liab_amt=0.0
+        st.experimental_rerun()
+
+    df = pd.DataFrame(data["liabilities"]) if data["liabilities"] else pd.DataFrame(columns=["category","amount"])
+    st.dataframe(df, use_container_width=True)
+    render_realtime_summary(cid)
+
+with tab_summary:
     st.subheader("Summary(보기/설정)")
-    if cid is None:
-        st.info("클라이언트를 선택하면 요약이 표시됩니다.")
-    else:
-        inc = book["income"]["Amount"].map(money).sum() if not book["income"].empty else 0.0
-        exp = book["expense"]["Amount"].map(money).sum() if not book["expense"].empty else 0.0
-        etc = 0.0
-        rem = inc - exp + etc
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: st.metric("Income", f"{inc:,.2f}")
-        with c2: st.metric("Expense", f"{exp:,.2f}")
-        with c3: st.metric("Remaining", f"{rem:,.2f}")
-        with c4: st.metric("Etc", f"{etc:,.2f}")
+    etc = st.number_input("Etc 금액", min_value=0.0, step=10.0, value=float(data.get("summary",{}).get("etc",0.0)))
+    if st.button("Etc 저장"):
+        data.setdefault("summary",{})["etc"] = float(etc)
+        save_client_data(cid, data)
+        st.success("저장 완료")
+        st.experimental_rerun()
 
-        st.markdown("— 상세 표")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Income Details**")
-            df = book["income"].copy()
-            if df.empty: st.info("없음")
-            else:
-                df.index = range(1,len(df)+1)
-                st.dataframe(df, use_container_width=True)
-        with col2:
-            st.markdown("**Expense Details**")
-            df = book["expense"].copy()
-            if df.empty: st.info("없음")
-            else:
-                df.index = range(1,len(df)+1)
-                st.dataframe(df, use_container_width=True)
+    st.markdown("#### 실시간 수치")
+    render_realtime_summary(cid)
+
+    st.markdown("#### 파이차트")
+    # 1) INCOME/EXPENSE/REMAINING/ETC
+    income = sum([x["amount"] for x in data["income_details"]]) if data["income_details"] else 0.0
+    expense = sum([x["amount"] for x in data["expense_details"]]) if data["expense_details"] else 0.0
+    remaining = max(income - expense, 0.0)
+    etc_val = float(data.get("summary",{}).get("etc", 0.0))
+    labels = ["Income","Expense","Remaining","Etc"]
+    vals = [income, expense, remaining, etc_val]
+    fig, ax = plt.subplots(figsize=(6,6))
+    wedges, texts, autotexts = ax.pie(vals, labels=labels, autopct="%1.1f%%")
+    ax.set_title("INCOME / EXPENSE")
+    st.pyplot(fig)
+
+    # 2) ASSET 분포
+    if data["assets"]:
+        dfA = pd.DataFrame(data["assets"])
+        grp = dfA.groupby("category")["amount"].sum().sort_values(ascending=False)
+        fig2, ax2 = plt.subplots(figsize=(6,6))
+        ax2.pie(grp.values, labels=grp.index, autopct="%1.1f%%")
+        ax2.set_title("ASSET")
+        st.pyplot(fig2)
+
+    # 3) LIABILITY 분포
+    if data["liabilities"]:
+        dfL = pd.DataFrame(data["liabilities"])
+        grpL = dfL.groupby("category")["amount"].sum().sort_values(ascending=False)
+        fig3, ax3 = plt.subplots(figsize=(6,6))
+        ax3.pie(grpL.values, labels=grpL.index, autopct="%1.1f%%")
+        ax3.set_title("LIABILITY")
+        st.pyplot(fig3)
