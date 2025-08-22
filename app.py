@@ -138,6 +138,7 @@ if "selected_client_id" not in st.session_state:
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
 
+# registration form state
 for k in [
     "reg_first","reg_last","reg_email","reg_phone",
     "reg_street","reg_apt","reg_city","reg_state","reg_zip",
@@ -158,6 +159,7 @@ def clear_transient_inputs(client_id: str | None):
             or key.startswith("assets_editor_")
             or key.startswith("liabilities_editor_")
             or key.startswith("summary_etc_")
+            or key.endswith(f"_working_{client_id}")
         ):
             st.session_state.pop(key, None)
 
@@ -388,7 +390,7 @@ with TAB2:
     else:
         st.info("등록된 클라이언트가 없습니다. ‘신규 등록’ 탭에서 먼저 등록하세요.")
 
-# -------- TAB 3: 재무 입력 (표 직접 편집) --------
+# -------- TAB 3: 재무 입력 (표 직접 편집 + 편의 기능) --------
 with TAB3:
     st.subheader("2) 재무 입력 (클라이언트별 저장)")
     sel_id = st.session_state.selected_client_id
@@ -397,70 +399,169 @@ with TAB3:
     else:
         finance = load_client_finance(sel_id)
 
+        # 프리셋
+        PRESETS = {
+            "income_details": ["Salary","Bonus","Interest","Dividend","Rental","Side Hustle","Other"],
+            "expense_details": ["Rent","Mortgage","Utilities","Groceries","Dining","Transport","Insurance","Medical",
+                                "Education","Childcare","Entertainment","Travel","Debt Payment","Taxes","Misc"],
+            "assets": ["Cash","Checking","Savings","Brokerage","Retirement","Real Estate","Vehicle","Crypto","Other"],
+            "liabilities": ["Credit Card","Mortgage","Student Loan","Auto Loan","Personal Loan","Tax Owed","Other"],
+        }
+
+        def _df_from_rows(section_key: str, rows: list) -> pd.DataFrame:
+            if section_key in ("income_details","expense_details"):
+                return pd.DataFrame(rows, columns=["category","desc","amount"])
+            return pd.DataFrame(rows, columns=["category","amount"])
+
+        def _empty_row(section_key: str) -> dict:
+            if section_key in ("income_details","expense_details"):
+                return {"category":"", "desc":"", "amount":0.0}
+            return {"category":"", "amount":0.0}
+
+        def get_working_df(section_key: str) -> pd.DataFrame:
+            sskey = f"{section_key}_working_{sel_id}"
+            if sskey not in st.session_state:
+                st.session_state[sskey] = _df_from_rows(section_key, finance.get(section_key, []))
+            # 방어: 컬럼 보정
+            df = st.session_state[sskey]
+            need_cols = ["category","amount"] if section_key not in ("income_details","expense_details") else ["category","desc","amount"]
+            for c in need_cols:
+                if c not in df.columns:
+                    df[c] = "" if c != "amount" else 0.0
+            st.session_state[sskey] = df[need_cols]
+            return st.session_state[sskey]
+
+        def set_working_df(section_key: str, df: pd.DataFrame):
+            sskey = f"{section_key}_working_{sel_id}"
+            st.session_state[sskey] = df.copy()
+
         def editor_section(title: str, section_key: str, has_desc: bool, key_prefix: str):
             st.markdown(f"### {title}")
 
-            # 현재 데이터프레임
-            rows = finance.get(section_key, [])
-            if has_desc:
-                df = pd.DataFrame(rows, columns=["category", "desc", "amount"])
-            else:
-                df = pd.DataFrame(rows, columns=["category", "amount"])
+            # 좌측: 프리셋 / 빠른 입력 / 편의 버튼
+            lcol, rcol = st.columns([1, 3])
 
-            # 컬럼 설정
-            col_cfg = {
-                "category": st.column_config.TextColumn("Category", required=True, help="필수"),
-                "amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=100.0, format="%.2f"),
-            }
-            if has_desc:
-                col_cfg["desc"] = st.column_config.TextColumn("Description", required=False)
+            with lcol:
+                st.caption("프리셋 추가")
+                presets = PRESETS.get(section_key, [])
+                preset_sel = st.multiselect("카테고리", presets, key=f"{key_prefix}_presel_{sel_id}")
+                if st.button("프리셋 행 추가", key=f"{key_prefix}_addpreset_{sel_id}"):
+                    df = get_working_df(section_key)
+                    for p in preset_sel:
+                        row = {"category": p, "amount": 0.0}
+                        if has_desc: row["desc"] = ""
+                        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                    set_working_df(section_key, df)
+                    st.success("프리셋을 추가했습니다.")
+                    st.rerun()
 
-            # data_editor (직접 편집/행 추가/삭제)
-            edited = st.data_editor(
-                df,
-                key=f"{key_prefix}_editor_{sel_id}",
-                num_rows="dynamic",
-                use_container_width=True,
-                hide_index=True,
-                column_config=col_cfg,
-            )
+                st.divider()
+                st.caption("빠른 입력")
+                q_cat = st.selectbox("Category", options=[""] + PRESETS.get(section_key, []), key=f"{key_prefix}_quick_cat_{sel_id}")
+                q_desc = st.text_input("Description", key=f"{key_prefix}_quick_desc_{sel_id}") if has_desc else ""
+                q_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{key_prefix}_quick_amt_{sel_id}")
+                if st.button("➕ 한 행 추가", key=f"{key_prefix}_quick_add_{sel_id}"):
+                    if (q_cat or "").strip() == "":
+                        st.warning("Category를 선택하세요.")
+                    else:
+                        df = get_working_df(section_key)
+                        row = {"category": q_cat.strip(), "amount": float(q_amt)}
+                        if has_desc: row["desc"] = (q_desc or "").strip()
+                        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                        set_working_df(section_key, df)
+                        # 입력칸 초기화
+                        st.session_state[f"{key_prefix}_quick_cat_{sel_id}"] = ""
+                        if has_desc: st.session_state[f"{key_prefix}_quick_desc_{sel_id}"] = ""
+                        st.session_state[f"{key_prefix}_quick_amt_{sel_id}"] = 0.0
+                        st.success("추가되었습니다.")
+                        st.rerun()
 
-            # 저장 버튼
-            if st.button("변경 사항 저장", key=f"{key_prefix}_save_{sel_id}"):
-                # 검증 & 정리
-                errs = []
-                clean_rows = []
+                st.divider()
+                st.caption("기타")
+                if st.button("빈 행 5개 추가", key=f"{key_prefix}_addblank_{sel_id}"):
+                    df = get_working_df(section_key)
+                    blanks = pd.DataFrame([_empty_row(section_key) for _ in range(5)])
+                    df = pd.concat([df, blanks], ignore_index=True)
+                    set_working_df(section_key, df); st.success("빈 행을 추가했습니다."); st.rerun()
 
-                # edited 가 Series로 들어오는 케이스 방지
+                df_current = get_working_df(section_key)
+                if len(df_current) > 0:
+                    dup_idx = st.number_input("복제할 행 index", min_value=0, max_value=max(0, len(df_current)-1), value=0, step=1, key=f"{key_prefix}_dupidx_{sel_id}")
+                    if st.button("선택 행 복제", key=f"{key_prefix}_duprow_{sel_id}"):
+                        df = get_working_df(section_key)
+                        row = df.iloc[int(dup_idx)].to_dict()
+                        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                        set_working_df(section_key, df); st.success("복제했습니다."); st.rerun()
+
+                if st.button("원본으로 되돌리기", key=f"{key_prefix}_reset_{sel_id}"):
+                    set_working_df(section_key, _df_from_rows(section_key, finance.get(section_key, [])))
+                    st.info("저장 전 상태로 되돌렸습니다."); st.rerun()
+
+            with rcol:
+                # 편집 테이블
+                df = get_working_df(section_key)
+
+                col_cfg = {
+                    "category": st.column_config.TextColumn("Category", required=True, help="필수"),
+                    "amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=100.0, format="%.2f"),
+                }
+                if has_desc:
+                    col_cfg["desc"] = st.column_config.TextColumn("Description")
+
+                edited = st.data_editor(
+                    df,
+                    key=f"{key_prefix}_editor_{sel_id}",
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=False,
+                    column_config=col_cfg,
+                )
+
+                # 에디터 결과를 워킹 DF로 반영
                 if isinstance(edited, pd.Series):
                     edited = edited.to_frame().T
+                set_working_df(section_key, edited)
 
-                for i, r in (edited.fillna({"category": "", "desc": ""}) if has_desc else edited.fillna({"category": ""})).iterrows():
-                    cat = str(r.get("category", "")).strip()
-                    amt = r.get("amount", 0)
-                    if cat == "":
-                        # 빈 행은 무시(완전 공행 또는 카테고리 없는 행)
-                        continue
-                    try:
-                        amt = float(amt)
-                        if amt < 0:
-                            errs.append(f"{title} 행 {i+1}: Amount는 0 이상이어야 합니다.")
-                    except Exception:
-                        errs.append(f"{title} 행 {i+1}: Amount가 올바르지 않습니다.")
-                        continue
+                # 섹션 합계
+                try:
+                    sec_sum = float(pd.to_numeric(edited["amount"], errors="coerce").fillna(0).sum())
+                except Exception:
+                    sec_sum = 0.0
+                st.caption(f"섹션 합계: ${sec_sum:,.2f}")
 
-                    row = {"category": cat, "amount": amt}
-                    if has_desc:
-                        row["desc"] = str(r.get("desc", "")).strip()
-                    clean_rows.append(row)
+                # 저장 버튼
+                if st.button("변경 사항 저장", key=f"{key_prefix}_save_{sel_id}"):
+                    errs = []
+                    clean_rows = []
+                    ed = edited.fillna({"category": "", "desc": ""}) if has_desc else edited.fillna({"category": ""})
+                    for i, r in ed.iterrows():
+                        cat = str(r.get("category", "")).strip()
+                        if cat == "":
+                            # 완전 공행/카테고리 없는 행은 스킵
+                            continue
+                        try:
+                            amt = float(r.get("amount", 0))
+                            if amt < 0:
+                                errs.append(f"{title} 행 {i}: Amount는 0 이상이어야 합니다.")
+                                continue
+                        except Exception:
+                            errs.append(f"{title} 행 {i}: Amount가 올바르지 않습니다.")
+                            continue
 
-                if errs:
-                    st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>", unsafe_allow_html=True)
-                else:
-                    finance[section_key] = clean_rows
-                    save_client_finance(sel_id, finance)
-                    st.success("저장되었습니다.")
-                    st.rerun()
+                        row = {"category": cat, "amount": amt}
+                        if has_desc:
+                            row["desc"] = str(r.get("desc", "")).strip()
+                        clean_rows.append(row)
+
+                    if errs:
+                        st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>", unsafe_allow_html=True)
+                    else:
+                        finance[section_key] = clean_rows
+                        save_client_finance(sel_id, finance)
+                        # 저장 후, 워킹 DF는 새로 로드한 값으로 갱신
+                        set_working_df(section_key, _df_from_rows(section_key, clean_rows))
+                        st.success("저장되었습니다.")
+                        st.rerun()
 
             st.markdown("---")
 
