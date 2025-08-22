@@ -302,22 +302,30 @@ with TAB2:
             })
 
         # --- Search ---
-        search_q = st.text_input("검색 (name / email / phone / address)", key="client_search", placeholder="e.g., chris, 224-829, deerfield, gmail")
+        search_q = st.text_input(
+            "검색 (name / email / phone / address)", key="client_search",
+            placeholder="e.g., chris, 224-829, deerfield, gmail",
+        )
+
         def normalize_phone(p):
             return re.sub(r"\D", "", p or "")
+
         if search_q:
             terms = [t.strip().lower() for t in search_q.split() if t.strip()]
+
             def match_row(r):
                 hay = " ".join([
-                    r.get("name",""), r.get("email",""), r.get("phone",""), r.get("home_address","")
+                    r.get("name", ""), r.get("email", ""), r.get("phone", ""), r.get("home_address", "")
                 ]).lower()
-                digits = normalize_phone(r.get("phone",""))
-                # term may be alphabet or digits
+                digits = normalize_phone(r.get("phone", ""))
+
                 def term_ok(t):
                     if re.sub(r"\D", "", t):
                         return re.sub(r"\D", "", t) in digits or t in hay
                     return t in hay
+
                 return all(term_ok(t) for t in terms)
+
             filtered = [r for r in table_rows if match_row(r)]
         else:
             filtered = table_rows
@@ -351,14 +359,14 @@ with TAB2:
             client = get_client(load_clients(), st.session_state.selected_client_id)
             if client:
                 st.markdown("---")
-                pc1, pc2 = st.columns([2,2])
+                pc1, pc2 = st.columns([2, 2])
                 with pc1:
                     st.markdown(f"**{client.get('first','')} {client.get('last','')}**")
-                    st.write(client.get("email",""))
-                    st.write(client.get("phone",""))
+                    st.write(client.get("email", ""))
+                    st.write(client.get("phone", ""))
                 with pc2:
-                    st.write(client.get("home_address",""))
-                    st.caption(client.get("notes",""))
+                    st.write(client.get("home_address", ""))
+                    st.caption(client.get("notes", ""))
 
         # Edit / Delete panel
         if st.session_state.selected_client_id:
@@ -378,10 +386,10 @@ with TAB2:
                     st.session_state.edit_notes = client.get("notes", "")
                     st.session_state._edit_loaded_id = client["id"]
 
-                # Keep phone formatted each render (safe even if key not initialized)
-phone_cur = st.session_state.get("edit_phone", None)
-if phone_cur is not None:
-    st.session_state.edit_phone = format_phone(phone_cur)
+                # Keep phone formatted each render (safe even if key not set yet)
+                phone_cur = st.session_state.get("edit_phone", None)
+                if phone_cur is not None:
+                    st.session_state.edit_phone = format_phone(phone_cur)
 
                 st.markdown("---")
                 st.markdown("### 프로필 수정")
@@ -410,11 +418,14 @@ if phone_cur is not None:
 
                     st.text_area("Notes", key="edit_notes")
 
-                    c_save, c_del = st.columns([1,1])
+                    c_save, c_del = st.columns([1, 1])
                     with c_save:
                         save_clicked = st.form_submit_button("수정 내용 저장")
                     with c_del:
-                        del_clicked = st.form_submit_button("선택 클라이언트 삭제", help="선택한 클라이언트와 해당 재무 데이터를 모두 삭제합니다 (되돌릴 수 없음)")
+                        del_clicked = st.form_submit_button(
+                            "선택 클라이언트 삭제",
+                            help="선택한 클라이언트와 해당 재무 데이터를 모두 삭제합니다 (되돌릴 수 없음)",
+                        )
 
                     if save_clicked:
                         errs = []
