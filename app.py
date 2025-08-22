@@ -76,6 +76,22 @@ def build_home_address(street: str, apt: str, city: str, state: str, zipcode: st
         pieces.append(loc)
     return ", ".join(pieces)
 
+# ---- date helpers ----
+def coerce_date_col(df: pd.DataFrame, col: str = "date") -> pd.DataFrame:
+    """Ensure df[col] is dtype datetime.date (or NaN)."""
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    return df
+
+def to_iso_date(val) -> str:
+    """Value from editor -> ISO date string."""
+    if isinstance(val, date):
+        return val.isoformat()
+    try:
+        return pd.to_datetime(val).date().isoformat()
+    except Exception:
+        return today_iso_date()
+
 # =====================
 # Robust file I/O
 # =====================
@@ -318,7 +334,7 @@ with TAB1:
                     "address_zip": st.session_state.reg_zip.strip(),
                     "notes": st.session_state.reg_notes.strip(),
                     "created_at": now_iso(),
-                    "archived": False,  # 아카이브 플래그
+                    "archived": False,
                 }
                 clients_local.append(new_client)
                 save_clients(clients_local)
@@ -390,12 +406,11 @@ with TAB2:
                     if not client.get("archived", False):
                         if st.button("📦 아카이브", key="btn_archive"):
                             cs = load_clients()
-                            c = get_client(cs, client["id"]); 
-                            if c: 
+                            c = get_client(cs, client["id"])
+                            if c:
                                 c["archived"] = True
                                 save_clients(cs)
                                 st.success("아카이브로 이동했습니다.")
-                                # 선택 해제 (기본 리스트에서는 숨김)
                                 st.session_state.selected_client_id = None
                                 st.rerun()
                     else:
@@ -558,15 +573,16 @@ with TAB3:
         }
 
         def _df_from_rows(section_key: str, rows: list) -> pd.DataFrame:
-            # date는 문자열(YYYY-MM-DD) 또는 None
             if section_key in ("income_details","expense_details"):
-                return pd.DataFrame(rows, columns=["category","desc","amount","date"])
-            return pd.DataFrame(rows, columns=["category","amount","date"])
+                df = pd.DataFrame(rows, columns=["category","desc","amount","date"])
+            else:
+                df = pd.DataFrame(rows, columns=["category","amount","date"])
+            return coerce_date_col(df, "date")
 
         def _empty_row(section_key: str) -> dict:
             if section_key in ("income_details","expense_details"):
-                return {"category":"", "desc":"", "amount":0.0, "date": today_iso_date()}
-            return {"category":"", "amount":0.0, "date": today_iso_date()}
+                return {"category":"", "desc":"", "amount":0.0, "date": date.today()}
+            return {"category":"", "amount":0.0, "date": date.today()}
 
         def get_working_df(section_key: str) -> pd.DataFrame:
             sskey = f"{section_key}_working_{sel_id}"
@@ -576,24 +592,31 @@ with TAB3:
             need_cols = ["category","amount","date"] if section_key not in ("income_details","expense_details") else ["category","desc","amount","date"]
             for c in need_cols:
                 if c not in df.columns:
-                    df[c] = today_iso_date() if c == "date" else (0.0 if c == "amount" else "")
-            # 정렬 컬럼 고정
-            st.session_state[sskey] = df[need_cols]
+                    if c == "date":
+                        df[c] = date.today()
+                    elif c == "amount":
+                        df[c] = 0.0
+                    else:
+                        df[c] = ""
+            df = df[need_cols]
+            df = coerce_date_col(df, "date")
+            st.session_state[sskey] = df
             return st.session_state[sskey]
 
         def set_working_df(section_key: str, df: pd.DataFrame):
             sskey = f"{section_key}_working_{sel_id}"
-            st.session_state[sskey] = df.copy()
+            st.session_state[sskey] = coerce_date_col(df.copy(), "date")
 
         def _clean_and_validate_df(title: str, edited: pd.DataFrame, has_desc: bool):
             errs = []
             clean_rows = []
             if isinstance(edited, pd.Series):
                 edited = edited.to_frame().T
-            fillmap = {"category": "", "date": today_iso_date()}
+            fillmap = {"category": "", "date": date.today()}
             if has_desc:
                 fillmap["desc"] = ""
             ed = edited.fillna(fillmap)
+            ed = coerce_date_col(ed, "date")
             for i, r in ed.iterrows():
                 cat = str(r.get("category", "")).strip()
                 if cat == "":
@@ -607,14 +630,8 @@ with TAB3:
                 except Exception:
                     errs.append(f"{title} 행 {i}: Amount가 올바르지 않습니다.")
                     continue
-                # date (YYYY-MM-DD) 허용, 잘못되면 오늘자로
-                d = str(r.get("date") or "").strip()
-                try:
-                    # pandas 로 변환 가능 여부 체크
-                    dt = pd.to_datetime(d).date() if d else date.today()
-                    d_str = dt.isoformat()
-                except Exception:
-                    d_str = today_iso_date()
+                # date -> ISO string
+                d_str = to_iso_date(r.get("date"))
 
                 row = {"category": cat, "amount": amt, "date": d_str}
                 if has_desc:
@@ -653,7 +670,7 @@ with TAB3:
                         st.warning("Category를 선택하세요.")
                     else:
                         df = get_working_df(section_key)
-                        row = {"category": q_cat.strip(), "amount": float(q_amt), "date": q_date.isoformat()}
+                        row = {"category": q_cat.strip(), "amount": float(q_amt), "date": q_date}
                         if has_desc: row["desc"] = (q_desc or "").strip()
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                         set_working_df(section_key, df)
@@ -718,7 +735,6 @@ with TAB3:
                 # ====== 자동 저장 처리 ======
                 if st.session_state.autosave:
                     clean_rows, errs = _clean_and_validate_df(title, edited, has_desc)
-                    # 저장 대상 데이터와 기존 저장 데이터 비교
                     if not errs and not _rows_equal(clean_rows, finance.get(section_key, [])):
                         finance[section_key] = clean_rows
                         save_client_finance(sel_id, finance)
@@ -791,7 +807,6 @@ with TAB4:
         if period == "이번 달":
             today = date.today()
             start_date = date(today.year, today.month, 1)
-            # 다음달 1일 - 1일
             if today.month == 12:
                 end_date = date(today.year+1, 1, 1)
             else:
@@ -806,10 +821,8 @@ with TAB4:
                 start_date = st.sidebar.date_input("시작일", value=date.today().replace(month=1, day=1))
             with c2:
                 end_date = st.sidebar.date_input("종료일(포함)", value=date.today())
-                # 내부 계산은 exclusive end로 사용 → +1일
                 end_date = end_date + pd.Timedelta(days=1)
 
-        # ===== 필터링 함수 =====
         def filter_rows(rows: list) -> list:
             if period == "전체":
                 return rows
@@ -817,21 +830,16 @@ with TAB4:
             for r in rows:
                 d = r.get("date")
                 if not d:
-                    # 날짜가 없으면 "전체"에서만 포함 → 기간 필터에서는 제외
                     continue
                 try:
                     dt = pd.to_datetime(d).date()
                 except Exception:
                     continue
-                # end_date는 exclusive
                 if start_date and end_date:
                     if start_date <= dt < end_date:
                         filtered.append(r)
-                else:
-                    filtered.append(r)
             return filtered
 
-        # ===== 차트 그리기 =====
         def draw_pie(values: list[float], labels_for_legend: list[str], title: str):
             vals, leg = zip(*[(v,l) for v,l in zip(values, labels_for_legend) if v > 0]) if any(values) else ([],[])
             fig, ax = plt.subplots(figsize=(pie_size, pie_size))
@@ -859,12 +867,12 @@ with TAB4:
         income_sum = float(sum(x.get("amount", 0.0) for x in inc_rows))
         expense_sum = float(sum(x.get("amount", 0.0) for x in exp_rows))
         remaining = max(income_sum - expense_sum, 0.0)
-        etc_val = float(finance.get("summary", {}).get("etc", 0.0))  # Etc는 기간 필터 미적용(설정값)
+        etc_val = float(finance.get("summary", {}).get("etc", 0.0))  # Etc는 기간 필터 미적용
         draw_pie([income_sum, expense_sum, remaining, etc_val], ["Income","Expense","Remaining","Etc"], "Income / Expense Mix")
 
         st.markdown("---")
 
-        # 2) Assets by Category (기간 필터 적용)
+        # 2) Assets by Category
         assets = filter_rows(finance.get("assets", []))
         if assets:
             df = pd.DataFrame(assets)
@@ -875,7 +883,7 @@ with TAB4:
 
         st.markdown("---")
 
-        # 3) Liabilities by Category (기간 필터 적용)
+        # 3) Liabilities by Category
         liabs = filter_rows(finance.get("liabilities", []))
         if liabs:
             df = pd.DataFrame(liabs)
