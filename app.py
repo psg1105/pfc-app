@@ -674,10 +674,12 @@ with TAB3:
                         if has_desc: row["desc"] = (q_desc or "").strip()
                         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
                         set_working_df(section_key, df)
-                        st.session_state[f"{key_prefix}_quick_cat_{sel_id}"] = ""
-                        if has_desc: st.session_state[f"{key_prefix}_quick_desc_{sel_id}"] = ""
-                        st.session_state[f"{key_prefix}_quick_amt_{sel_id}"] = 0.0
-                        st.session_state[f"{key_prefix}_quick_date_{sel_id}"] = date.today()
+                        # 안전 초기화: 직접 대입 대신 pop으로 비우기
+                        st.session_state.pop(f"{key_prefix}_quick_cat_{sel_id}", None)
+                        if has_desc:
+                            st.session_state.pop(f"{key_prefix}_quick_desc_{sel_id}", None)
+                        st.session_state.pop(f"{key_prefix}_quick_amt_{sel_id}", None)
+                        st.session_state.pop(f"{key_prefix}_quick_date_{sel_id}", None)
                         st.success("추가되었습니다."); st.rerun()
 
                 st.divider()
