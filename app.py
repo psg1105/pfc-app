@@ -204,27 +204,27 @@ with TAB1:
     with st.form("new_client_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
         with col1:
-            st.session_state.reg_first = st.text_input("First Name", value=st.session_state.reg_first, key="reg_first")
+            st.text_input("First Name", key="reg_first")
         with col2:
-            st.session_state.reg_last = st.text_input("Last Name", value=st.session_state.reg_last, key="reg_last")
+            st.text_input("Last Name", key="reg_last")
 
         col1, col2 = st.columns(2)
         with col1:
-            st.session_state.reg_phone = st.text_input("Phone (10 digits)", value=st.session_state.reg_phone, key="reg_phone")
+            st.text_input("Phone (10 digits)", key="reg_phone")
         with col2:
-            st.session_state.reg_email = st.text_input("Email", value=st.session_state.reg_email, key="reg_email")
+            st.text_input("Email", key="reg_email")
 
         st.markdown("**Home Address**")
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.session_state.reg_street = st.text_input("Street Address", value=st.session_state.reg_street, key="reg_street")
-            st.session_state.reg_apt = st.text_input("Ste (Apt/Unit) — Optional", value=st.session_state.reg_apt, key="reg_apt")
+            st.text_input("Street Address", key="reg_street")
+            st.text_input("Ste (Apt/Unit) — Optional", key="reg_apt")
         with col2:
-            st.session_state.reg_city = st.text_input("City", value=st.session_state.reg_city, key="reg_city")
-            st.session_state.reg_state = st.text_input("State (2 letters)", value=st.session_state.reg_state, key="reg_state")
-            st.session_state.reg_zip = st.text_input("Zip (12345 or 12345-6789)", value=st.session_state.reg_zip, key="reg_zip")
+            st.text_input("City", key="reg_city")
+            st.text_input("State (2 letters)", key="reg_state")
+            st.text_input("Zip (12345 or 12345-6789)", key="reg_zip")
 
-        st.session_state.reg_notes = st.text_area("Notes", value=st.session_state.reg_notes, key="reg_notes")
+        st.text_area("Notes", key="reg_notes")
 
         submitted = st.form_submit_button("등록")
         if submitted:
@@ -354,27 +354,27 @@ with TAB2:
                 with st.form("edit_client_form"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.session_state.edit_first = st.text_input("First Name", value=st.session_state.edit_first, key="edit_first")
+                        st.text_input("First Name", key="edit_first")
                     with col2:
-                        st.session_state.edit_last = st.text_input("Last Name", value=st.session_state.edit_last, key="edit_last")
+                        st.text_input("Last Name", key="edit_last")
 
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.session_state.edit_phone = st.text_input("Phone (10 digits)", value=st.session_state.edit_phone, key="edit_phone")
+                        st.text_input("Phone (10 digits)", key="edit_phone")
                     with col2:
-                        st.session_state.edit_email = st.text_input("Email", value=st.session_state.edit_email, key="edit_email")
+                        st.text_input("Email", key="edit_email")
 
                     st.markdown("**Home Address**")
                     col1, col2 = st.columns([2, 1])
                     with col1:
-                        st.session_state.edit_street = st.text_input("Street Address", value=st.session_state.edit_street, key="edit_street")
-                        st.session_state.edit_apt = st.text_input("Ste (Apt/Unit) — Optional", value=st.session_state.edit_apt, key="edit_apt")
+                        st.text_input("Street Address", key="edit_street")
+                        st.text_input("Ste (Apt/Unit) — Optional", key="edit_apt")
                     with col2:
-                        st.session_state.edit_city = st.text_input("City", value=st.session_state.edit_city, key="edit_city")
-                        st.session_state.edit_state = st.text_input("State (2 letters)", value=st.session_state.edit_state, key="edit_state")
-                        st.session_state.edit_zip = st.text_input("Zip (12345 or 12345-6789)", value=st.session_state.edit_zip, key="edit_zip")
+                        st.text_input("City", key="edit_city")
+                        st.text_input("State (2 letters)", key="edit_state")
+                        st.text_input("Zip (12345 or 12345-6789)", key="edit_zip")
 
-                    st.session_state.edit_notes = st.text_area("Notes", value=st.session_state.edit_notes, key="edit_notes")
+                    st.text_area("Notes", key="edit_notes")
 
                     c_save, c_del = st.columns([1,1])
                     with c_save:
