@@ -30,38 +30,29 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 ZIP_RE = re.compile(r"^\d{5}(-\d{4})?$")
 STATE_RE = re.compile(r"^[A-Za-z]{2}$")
 
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def only_digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
-
 def format_phone(s: str) -> str:
-    """Format to 000-000-0000 if 10 digits; otherwise return digits as typed."""
     d = only_digits(s)
     if len(d) == 10:
         return f"{d[0:3]}-{d[3:6]}-{d[6:10]}"
     return d
 
-
 def validate_email(email: str) -> bool:
     return bool(EMAIL_RE.match(email or ""))
-
 
 def validate_phone10(phone: str) -> bool:
     return len(only_digits(phone)) == 10
 
-
 def validate_state(state: str) -> bool:
     return bool(STATE_RE.match((state or "").strip()))
 
-
 def validate_zip(zipcode: str) -> bool:
     return bool(ZIP_RE.match((zipcode or "").strip()))
-
 
 def build_home_address(street: str, apt: str, city: str, state: str, zipcode: str) -> str:
     street_part = (street or "").strip()
@@ -78,7 +69,6 @@ def build_home_address(street: str, apt: str, city: str, state: str, zipcode: st
         pieces.append(loc)
     return ", ".join(pieces)
 
-
 # =====================
 # Persistence helpers
 # =====================
@@ -88,10 +78,8 @@ def load_clients() -> list:
     except Exception:
         return []
 
-
 def save_clients(clients: list) -> None:
     CLIENTS_FILE.write_text(json.dumps(clients, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def get_client(clients: list, client_id: str) -> dict | None:
     for c in clients:
@@ -99,80 +87,67 @@ def get_client(clients: list, client_id: str) -> dict | None:
             return c
     return None
 
-
 def client_data_path(client_id: str) -> Path:
     return DATA_DIR / f"client_{client_id}.json"
 
+def _empty_finance() -> dict:
+    return {
+        "income_details": [],
+        "expense_details": [],
+        "assets": [],
+        "liabilities": [],
+        "summary": {"etc": 0.0},
+    }
 
 def load_client_finance(client_id: str) -> dict:
     p = client_data_path(client_id)
     if not p.exists():
-        data = {
-            "income_details": [],
-            "expense_details": [],
-            "assets": [],
-            "liabilities": [],
-            "summary": {"etc": 0.0},
-        }
+        data = _empty_finance()
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return data
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        # schema guard
+        for k, v in _empty_finance().items():
+            raw.setdefault(k, v)
+        raw["summary"].setdefault("etc", 0.0)
+        return raw
     except Exception:
-        return {
-            "income_details": [],
-            "expense_details": [],
-            "assets": [],
-            "liabilities": [],
-            "summary": {"etc": 0.0},
-        }
-
+        return _empty_finance()
 
 def save_client_finance(client_id: str, data: dict) -> None:
     p = client_data_path(client_id)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
 def delete_client_and_data(client_id: str) -> None:
-    # delete finance file
     p = client_data_path(client_id)
     if p.exists():
         try:
             p.unlink()
         except Exception:
             pass
-    # delete from clients.json
     clients = load_clients()
     clients = [c for c in clients if c.get("id") != client_id]
     save_clients(clients)
-
 
 # =====================
 # Session defaults & helpers
 # =====================
 if "selected_client_id" not in st.session_state:
     st.session_state.selected_client_id = None
-
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
 
-if "_prev_selected_client_id" not in st.session_state:
-    st.session_state._prev_selected_client_id = None
-
-# Initialize registration session fields
 for k in [
-    "reg_first", "reg_last", "reg_email", "reg_phone",
-    "reg_street", "reg_apt", "reg_city", "reg_state", "reg_zip",
+    "reg_first","reg_last","reg_email","reg_phone",
+    "reg_street","reg_apt","reg_city","reg_state","reg_zip",
     "reg_notes",
 ]:
     st.session_state.setdefault(k, "")
 
-# Keep phone fields formatted on every rerun (no on_change)
 st.session_state.reg_phone = format_phone(st.session_state.reg_phone)
 
-
 def clear_transient_inputs(client_id: str | None):
-    """Clear temporary widget values that are namespaced with a specific client id."""
     if not client_id:
         return
     suffix = f"_{client_id}"
@@ -183,12 +158,12 @@ def clear_transient_inputs(client_id: str | None):
             or key.startswith("assets_")
             or key.startswith("liabilities_")
             or key.startswith("summary_etc_")
+            or key.startswith("editrow_")
         ):
             st.session_state.pop(key, None)
 
-
 # =====================
-# Top summary (fixed at top for selected client)
+# Top summary
 # =====================
 summary_box = st.container()
 with summary_box:
@@ -245,40 +220,24 @@ with TAB1:
 
         submitted = st.form_submit_button("등록")
         if submitted:
-            # Validation
             errs = []
-            if not st.session_state.reg_first.strip():
-                errs.append("First Name을 입력하세요.")
-            if not st.session_state.reg_last.strip():
-                errs.append("Last Name을 입력하세요.")
-            if not validate_email(st.session_state.reg_email):
-                errs.append("Email 형식이 올바르지 않습니다.")
-            if not validate_phone10(st.session_state.reg_phone):
-                errs.append("Phone Number는 정확히 10자리여야 합니다.")
-            if not st.session_state.reg_street.strip():
-                errs.append("Street Address를 입력하세요.")
-            if not st.session_state.reg_city.strip():
-                errs.append("City를 입력하세요.")
-            if not validate_state(st.session_state.reg_state):
-                errs.append("State는 2글자여야 합니다.")
-            if not validate_zip(st.session_state.reg_zip):
-                errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
+            if not st.session_state.reg_first.strip(): errs.append("First Name을 입력하세요.")
+            if not st.session_state.reg_last.strip(): errs.append("Last Name을 입력하세요.")
+            if not validate_email(st.session_state.reg_email): errs.append("Email 형식이 올바르지 않습니다.")
+            if not validate_phone10(st.session_state.reg_phone): errs.append("Phone Number는 정확히 10자리여야 합니다.")
+            if not st.session_state.reg_street.strip(): errs.append("Street Address를 입력하세요.")
+            if not st.session_state.reg_city.strip(): errs.append("City를 입력하세요.")
+            if not validate_state(st.session_state.reg_state): errs.append("State는 2글자여야 합니다.")
+            if not validate_zip(st.session_state.reg_zip): errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
 
             if errs:
-                st.markdown(
-                    "<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
             else:
-                # Build client object
                 phone_fmt = format_phone(st.session_state.reg_phone)
                 state_up = st.session_state.reg_state.strip().upper()
                 home_address = build_home_address(
-                    st.session_state.reg_street,
-                    st.session_state.reg_apt,
-                    st.session_state.reg_city,
-                    state_up,
-                    st.session_state.reg_zip,
+                    st.session_state.reg_street, st.session_state.reg_apt,
+                    st.session_state.reg_city, state_up, st.session_state.reg_zip,
                 )
                 new_client = {
                     "id": uuid.uuid4().hex,
@@ -287,7 +246,6 @@ with TAB1:
                     "email": st.session_state.reg_email.strip(),
                     "phone": phone_fmt,
                     "home_address": home_address,
-                    # Store structured pieces for future edits/validation
                     "address_street": st.session_state.reg_street.strip(),
                     "address_apt": st.session_state.reg_apt.strip(),
                     "address_city": st.session_state.reg_city.strip(),
@@ -308,127 +266,83 @@ with TAB2:
     clients = load_clients()
 
     if clients:
-        # Build display table base rows
-        table_rows = []
-        for c in clients:
-            table_rows.append({
-                "id": c.get("id"),
-                "name": f"{c.get('first','')} {c.get('last','')}",
-                "email": c.get("email",""),
-                "phone": c.get("phone",""),
-                "home_address": c.get("home_address",""),
-            })
+        rows = [{
+            "id": c.get("id"),
+            "name": f"{c.get('first','')} {c.get('last','')}",
+            "email": c.get("email",""),
+            "phone": c.get("phone",""),
+            "home_address": c.get("home_address",""),
+        } for c in clients]
 
-        # --- Search ---
-        search_q = st.text_input(
-            "검색 (name / email / phone / address)", key="client_search",
-            placeholder="e.g., chris, 224-829, deerfield, gmail",
-        )
-
-        def normalize_phone(p):
-            return re.sub(r"\D", "", p or "")
-
+        search_q = st.text_input("검색 (name / email / phone / address)", key="client_search", placeholder="e.g., chris, 224-829, deerfield, gmail")
+        def norm_phone(p): return re.sub(r"\D","",p or "")
+        filtered = rows
         if search_q:
             terms = [t.strip().lower() for t in search_q.split() if t.strip()]
-
-            def match_row(r):
-                hay = " ".join([
-                    r.get("name", ""), r.get("email", ""), r.get("phone", ""), r.get("home_address", "")
-                ]).lower()
-                digits = normalize_phone(r.get("phone", ""))
-
-                def term_ok(t):
-                    if re.sub(r"\D", "", t):
-                        return re.sub(r"\D", "", t) in digits or t in hay
+            def match(r):
+                hay = " ".join([r["name"], r["email"], r["phone"], r["home_address"]]).lower()
+                digits = norm_phone(r["phone"])
+                def ok(t):
+                    if re.sub(r"\D","",t):
+                        return re.sub(r"\D","",t) in digits or t in hay
                     return t in hay
+                return all(ok(t) for t in terms)
+            filtered = [r for r in rows if match(r)]
 
-                return all(term_ok(t) for t in terms)
+        if not filtered: st.warning("검색 결과가 없습니다.")
+        st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
 
-            filtered = [r for r in table_rows if match_row(r)]
-        else:
-            filtered = table_rows
-
-        if not filtered:
-            st.warning("검색 결과가 없습니다.")
-
-        # Show filtered table
-        df = pd.DataFrame(filtered)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # Selection box from filtered
-        opt_labels = [f"{r['name']} ({r['email']})" for r in filtered]
-        opt_ids = [r['id'] for r in filtered]
-
-        # Determine current index based on session selection
-        try:
-            cur_idx = opt_ids.index(st.session_state.selected_client_id) if st.session_state.selected_client_id in opt_ids else 0
-        except Exception:
-            cur_idx = 0
-
-        sel_label = st.selectbox("클라이언트 선택", options=opt_labels, index=cur_idx if opt_labels else 0)
-        sel_id = opt_ids[opt_labels.index(sel_label)] if opt_labels else None
+        labels = [f"{r['name']} ({r['email']})" for r in filtered]
+        ids    = [r["id"] for r in filtered]
+        idx = 0
+        if st.session_state.selected_client_id in ids:
+            idx = ids.index(st.session_state.selected_client_id)
+        sel_label = st.selectbox("클라이언트 선택", options=labels, index=idx if labels else 0)
+        sel_id = ids[labels.index(sel_label)] if labels else None
         if sel_id != st.session_state.selected_client_id:
-            # clear transient inputs for previous client
             clear_transient_inputs(st.session_state.selected_client_id)
-            st.session_state._prev_selected_client_id = st.session_state.selected_client_id
             st.session_state.selected_client_id = sel_id
-            st.session_state._edit_loaded_id = None  # force reload edit fields
+            st.session_state._edit_loaded_id = None
             st.rerun()
 
-        # Profile preview card
         if st.session_state.selected_client_id:
             client = get_client(load_clients(), st.session_state.selected_client_id)
             if client:
                 st.markdown("---")
-                pc1, pc2 = st.columns([2, 2])
-                with pc1:
+                c1,c2 = st.columns([2,2])
+                with c1:
                     st.markdown(f"**{client.get('first','')} {client.get('last','')}**")
-                    st.write(client.get("email", ""))
-                    st.write(client.get("phone", ""))
-                with pc2:
-                    st.write(client.get("home_address", ""))
-                    st.caption(client.get("notes", ""))
+                    st.write(client.get("email","")); st.write(client.get("phone",""))
+                with c2:
+                    st.write(client.get("home_address","")); st.caption(client.get("notes",""))
 
-        # Edit / Delete panel
-        if st.session_state.selected_client_id:
-            client = get_client(load_clients(), st.session_state.selected_client_id)
             if client:
-                # Initialize edit session fields only when selection changes
                 if st.session_state._edit_loaded_id != client["id"]:
-                    st.session_state.edit_first = client.get("first", "")
-                    st.session_state.edit_last = client.get("last", "")
-                    st.session_state.edit_email = client.get("email", "")
-                    st.session_state.edit_phone = client.get("phone", "")
-                    st.session_state.edit_street = client.get("address_street", "")
-                    st.session_state.edit_apt = client.get("address_apt", "")
-                    st.session_state.edit_city = client.get("address_city", "")
-                    st.session_state.edit_state = client.get("address_state", "")
-                    st.session_state.edit_zip = client.get("address_zip", "")
-                    st.session_state.edit_notes = client.get("notes", "")
+                    st.session_state.edit_first  = client.get("first","")
+                    st.session_state.edit_last   = client.get("last","")
+                    st.session_state.edit_email  = client.get("email","")
+                    st.session_state.edit_phone  = client.get("phone","")
+                    st.session_state.edit_street = client.get("address_street","")
+                    st.session_state.edit_apt    = client.get("address_apt","")
+                    st.session_state.edit_city   = client.get("address_city","")
+                    st.session_state.edit_state  = client.get("address_state","")
+                    st.session_state.edit_zip    = client.get("address_zip","")
+                    st.session_state.edit_notes  = client.get("notes","")
                     st.session_state._edit_loaded_id = client["id"]
 
-                # Keep phone formatted each render (safe even if key not set yet)
-                phone_cur = st.session_state.get("edit_phone", None)
-                if phone_cur is not None:
-                    st.session_state.edit_phone = format_phone(phone_cur)
+                cur = st.session_state.get("edit_phone", None)
+                if cur is not None: st.session_state.edit_phone = format_phone(cur)
 
-                st.markdown("---")
-                st.markdown("### 프로필 수정")
+                st.markdown("---"); st.markdown("### 프로필 수정")
                 with st.form("edit_client_form"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.text_input("First Name", key="edit_first")
-                    with col2:
-                        st.text_input("Last Name", key="edit_last")
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.text_input("Phone (10 digits)", key="edit_phone")
-                    with col2:
-                        st.text_input("Email", key="edit_email")
-
+                    col1,col2 = st.columns(2)
+                    with col1: st.text_input("First Name", key="edit_first")
+                    with col2: st.text_input("Last Name", key="edit_last")
+                    col1,col2 = st.columns(2)
+                    with col1: st.text_input("Phone (10 digits)", key="edit_phone")
+                    with col2: st.text_input("Email", key="edit_email")
                     st.markdown("**Home Address**")
-                    col1, col2 = st.columns([2, 1])
+                    col1,col2 = st.columns([2,1])
                     with col1:
                         st.text_input("Street Address", key="edit_street")
                         st.text_input("Ste (Apt/Unit) — Optional", key="edit_apt")
@@ -436,78 +350,53 @@ with TAB2:
                         st.text_input("City", key="edit_city")
                         st.text_input("State (2 letters)", key="edit_state")
                         st.text_input("Zip (12345 or 12345-6789)", key="edit_zip")
-
                     st.text_area("Notes", key="edit_notes")
 
-                    c_save, c_del = st.columns([1, 1])
-                    with c_save:
-                        save_clicked = st.form_submit_button("수정 내용 저장")
-                    with c_del:
-                        del_clicked = st.form_submit_button(
-                            "선택 클라이언트 삭제",
-                            help="선택한 클라이언트와 해당 재무 데이터를 모두 삭제합니다 (되돌릴 수 없음)",
-                        )
+                    csave, cdel = st.columns([1,1])
+                    with csave: save_clicked = st.form_submit_button("수정 내용 저장")
+                    with cdel:  del_clicked  = st.form_submit_button("선택 클라이언트 삭제", help="선택한 클라이언트와 해당 재무 데이터를 모두 삭제합니다 (되돌릴 수 없음)")
 
                     if save_clicked:
-                        errs = []
-                        if not st.session_state.edit_first.strip():
-                            errs.append("First Name을 입력하세요.")
-                        if not st.session_state.edit_last.strip():
-                            errs.append("Last Name을 입력하세요.")
-                        if not validate_email(st.session_state.edit_email):
-                            errs.append("Email 형식이 올바르지 않습니다.")
-                        if not validate_phone10(st.session_state.edit_phone):
-                            errs.append("Phone Number는 정확히 10자리여야 합니다.")
-                        if not st.session_state.edit_street.strip():
-                            errs.append("Street Address를 입력하세요.")
-                        if not st.session_state.edit_city.strip():
-                            errs.append("City를 입력하세요.")
-                        if not validate_state(st.session_state.edit_state):
-                            errs.append("State는 2글자여야 합니다.")
-                        if not validate_zip(st.session_state.edit_zip):
-                            errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
-
+                        errs=[]
+                        if not st.session_state.edit_first.strip(): errs.append("First Name을 입력하세요.")
+                        if not st.session_state.edit_last.strip(): errs.append("Last Name을 입력하세요.")
+                        if not validate_email(st.session_state.edit_email): errs.append("Email 형식이 올바르지 않습니다.")
+                        if not validate_phone10(st.session_state.edit_phone): errs.append("Phone Number는 정확히 10자리여야 합니다.")
+                        if not st.session_state.edit_street.strip(): errs.append("Street Address를 입력하세요.")
+                        if not st.session_state.edit_city.strip(): errs.append("City를 입력하세요.")
+                        if not validate_state(st.session_state.edit_state): errs.append("State는 2글자여야 합니다.")
+                        if not validate_zip(st.session_state.edit_zip): errs.append("Zip은 12345 또는 12345-6789 형식이어야 합니다.")
                         if errs:
-                            st.markdown(
-                                "<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
                         else:
-                            # Apply formatting and save
-                            clients = load_clients()
-                            c = get_client(clients, client["id"]) or {}
+                            cs = load_clients()
+                            c = get_client(cs, client["id"]) or {}
                             c["first"] = st.session_state.edit_first.strip()
-                            c["last"] = st.session_state.edit_last.strip()
+                            c["last"]  = st.session_state.edit_last.strip()
                             c["email"] = st.session_state.edit_email.strip()
                             c["phone"] = format_phone(st.session_state.edit_phone)
                             c["address_street"] = st.session_state.edit_street.strip()
-                            c["address_apt"] = st.session_state.edit_apt.strip()
-                            c["address_city"] = st.session_state.edit_city.strip()
-                            c["address_state"] = st.session_state.edit_state.strip().upper()
-                            c["address_zip"] = st.session_state.edit_zip.strip()
-                            c["home_address"] = build_home_address(
+                            c["address_apt"]    = st.session_state.edit_apt.strip()
+                            c["address_city"]   = st.session_state.edit_city.strip()
+                            c["address_state"]  = st.session_state.edit_state.strip().upper()
+                            c["address_zip"]    = st.session_state.edit_zip.strip()
+                            c["home_address"]   = build_home_address(
                                 c["address_street"], c["address_apt"], c["address_city"], c["address_state"], c["address_zip"]
                             )
                             c["notes"] = st.session_state.edit_notes.strip()
-                            save_clients(clients)
-                            st.success("저장되었습니다.")
-                            st.rerun()
+                            save_clients(cs)
+                            st.success("저장되었습니다."); st.rerun()
 
                     if del_clicked:
                         st.warning("삭제는 되돌릴 수 없습니다. 하단 체크 후 최종 삭제를 눌러주세요.")
-                        confirm = st.checkbox("정말 삭제합니다.")
-                        if confirm and st.button("최종 삭제", type="primary"):
-                            target_id = client["id"]
-                            delete_client_and_data(target_id)
-                            # Clear selection
-                            if st.session_state.selected_client_id == target_id:
-                                st.session_state.selected_client_id = None
-                            st.success("삭제되었습니다.")
-                            st.rerun()
+                        if st.checkbox("정말 삭제합니다.") and st.button("최종 삭제", type="primary"):
+                            delete_client_and_data(client["id"])
+                            st.session_state.selected_client_id = None
+                            st.success("삭제되었습니다."); st.rerun()
     else:
         st.info("등록된 클라이언트가 없습니다. ‘신규 등록’ 탭에서 먼저 등록하세요.")
 
-# -------- TAB 3: 재무 입력 --------
+# -------- TAB 3: 재무 입력 (CRUD 완성) --------
 with TAB3:
     st.subheader("2) 재무 입력 (클라이언트별 저장)")
     sel_id = st.session_state.selected_client_id
@@ -516,80 +405,103 @@ with TAB3:
     else:
         finance = load_client_finance(sel_id)
 
-        def render_table_and_add(section_key: str, fields: list[str]):
-            # Show existing
-            items = finance.get(section_key, [])
-            if section_key in ("income_details", "expense_details"):
-                cols = ["category", "desc", "amount"]
+        def human_label(section_key: str, item: dict, idx: int) -> str:
+            if section_key in ("income_details","expense_details"):
+                return f"[{idx}] {item.get('category','')} / {item.get('desc','')} / ${item.get('amount',0):,.2f}"
             else:
-                cols = ["category", "amount"] if section_key in ("assets", "liabilities") else []
-            if items and cols:
+                return f"[{idx}] {item.get('category','')} / ${item.get('amount',0):,.2f}"
+
+        def render_section(section_key: str, has_desc: bool):
+            items = finance.get(section_key, [])
+            cols = ["category","desc","amount"] if has_desc else ["category","amount"]
+            if items:
                 st.dataframe(pd.DataFrame(items)[cols], use_container_width=True, hide_index=True)
             else:
                 st.caption("(아직 항목이 없습니다)")
 
-            # Add new (keys namespaced by client id)
+            # ---- Add
             with st.form(f"add_{section_key}", clear_on_submit=True):
-                inputs = {}
-                if section_key in ("income_details", "expense_details"):
-                    c1, c2, c3 = st.columns([1, 2, 1])
-                    with c1:
-                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
-                    with c2:
-                        inputs["desc"] = st.text_input("Description", key=f"{section_key}_desc_{sel_id}")
-                    with c3:
-                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
+                c1,c2,c3 = (st.columns([1,2,1]) if has_desc else st.columns([2,1]))
+                if has_desc:
+                    with c1: new_cat = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
+                    with c2: new_desc = st.text_input("Description", key=f"{section_key}_desc_{sel_id}")
+                    with c3: new_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
                 else:
-                    c1, c2 = st.columns([2, 1])
-                    with c1:
-                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
-                    with c2:
-                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
-
-                add_btn = st.form_submit_button("추가")
-                if add_btn:
-                    errs = []
-                    if not (inputs.get("category") or "").strip():
-                        errs.append("Category를 입력하세요.")
+                    with c1: new_cat = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
+                    with c2: new_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
+                    new_desc = ""
+                if st.form_submit_button("추가"):
+                    errs=[]
+                    if not (new_cat or "").strip(): errs.append("Category를 입력하세요.")
                     try:
-                        amt = float(inputs.get("amount", 0.0))
-                        if amt < 0:
-                            errs.append("Amount는 0 이상이어야 합니다.")
+                        amt = float(new_amt)
+                        if amt < 0: errs.append("Amount는 0 이상이어야 합니다.")
                     except Exception:
                         errs.append("Amount가 올바르지 않습니다.")
-
                     if errs:
-                        st.markdown(
-                            "<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>",
-                            unsafe_allow_html=True,
-                        )
+                        st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
                     else:
-                        rec = {"category": inputs["category"].strip(), "amount": float(inputs["amount"])}
-                        if section_key in ("income_details", "expense_details"):
-                            rec["desc"] = (inputs.get("desc") or "").strip()
+                        rec = {"category": new_cat.strip(), "amount": float(new_amt)}
+                        if has_desc: rec["desc"] = (new_desc or "").strip()
                         finance[section_key].append(rec)
                         save_client_finance(sel_id, finance)
-                        # Explicitly clear transient widget keys for this client
-                        for k in [
-                            f"{section_key}_category_{sel_id}",
-                            f"{section_key}_desc_{sel_id}",
-                            f"{section_key}_amount_{sel_id}",
-                        ]:
+                        for k in [f"{section_key}_category_{sel_id}", f"{section_key}_desc_{sel_id}", f"{section_key}_amount_{sel_id}"]:
                             st.session_state.pop(k, None)
-                        st.success("추가되었습니다.")
-                        st.rerun()
+                        st.success("추가되었습니다."); st.rerun()
 
-        subtabs = st.tabs(["Income", "Expense", "Assets", "Liabilities", "Summary"])
+            # ---- Edit / Delete
+            with st.expander("편집 / 삭제", expanded=False):
+                if not items:
+                    st.caption("편집/삭제할 항목이 없습니다.")
+                else:
+                    label_list = [human_label(section_key, it, i) for i,it in enumerate(items)]
+                    sel_key = f"editrow_select_{section_key}_{sel_id}"
+                    row_label = st.selectbox("항목 선택", options=label_list, key=sel_key)
+                    row_idx = label_list.index(row_label)
 
-        with subtabs[0]:
-            render_table_and_add("income_details", ["category", "desc", "amount"])
-        with subtabs[1]:
-            render_table_and_add("expense_details", ["category", "desc", "amount"])
-        with subtabs[2]:
-            render_table_and_add("assets", ["category", "amount"])
-        with subtabs[3]:
-            render_table_and_add("liabilities", ["category", "amount"])
-        with subtabs[4]:
+                    # Edit form
+                    with st.form(f"edit_{section_key}", clear_on_submit=True):
+                        c1,c2,c3 = (st.columns([1,2,1]) if has_desc else st.columns([2,1]))
+                        if has_desc:
+                            with c1: e_cat = st.text_input("Category", value=items[row_idx].get("category",""))
+                            with c2: e_desc = st.text_input("Description", value=items[row_idx].get("desc",""))
+                            with c3: e_amt = st.number_input("Amount", min_value=0.0, value=float(items[row_idx].get("amount",0.0)), step=100.0)
+                        else:
+                            with c1: e_cat = st.text_input("Category", value=items[row_idx].get("category",""))
+                            with c2: e_amt = st.number_input("Amount", min_value=0.0, value=float(items[row_idx].get("amount",0.0)), step=100.0)
+                            e_desc = ""
+                        c_a, c_b = st.columns([1,1])
+                        with c_a: edit_ok = st.form_submit_button("수정 저장")
+                        with c_b: del_ok  = st.form_submit_button("이 항목 삭제")
+
+                        if edit_ok:
+                            errs=[]
+                            if not e_cat.strip(): errs.append("Category를 입력하세요.")
+                            try:
+                                if float(e_amt) < 0: errs.append("Amount는 0 이상이어야 합니다.")
+                            except Exception:
+                                errs.append("Amount가 올바르지 않습니다.")
+                            if errs:
+                                st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
+                            else:
+                                finance[section_key][row_idx]["category"] = e_cat.strip()
+                                finance[section_key][row_idx]["amount"]   = float(e_amt)
+                                if has_desc:
+                                    finance[section_key][row_idx]["desc"] = (e_desc or "").strip()
+                                save_client_finance(sel_id, finance)
+                                st.success("수정되었습니다."); st.rerun()
+
+                        if del_ok:
+                            finance[section_key].pop(row_idx)
+                            save_client_finance(sel_id, finance)
+                            st.success("삭제되었습니다."); st.rerun()
+
+        inc, exp, ast, lia, summ = st.tabs(["Income","Expense","Assets","Liabilities","Summary"])
+        with inc: render_section("income_details", has_desc=True)
+        with exp: render_section("expense_details", has_desc=True)
+        with ast: render_section("assets", has_desc=False)
+        with lia: render_section("liabilities", has_desc=False)
+        with summ:
             st.markdown("**Etc 설정**")
             etc_val = float(finance.get("summary", {}).get("etc", 0.0))
             etc_key = f"summary_etc_{sel_id}"
@@ -597,18 +509,15 @@ with TAB3:
             if st.button("Etc 저장"):
                 finance.setdefault("summary", {})["etc"] = float(new_etc)
                 save_client_finance(sel_id, finance)
-                # Clear transient etc key for this client to avoid carry-over
                 st.session_state.pop(etc_key, None)
-                st.success("저장되었습니다.")
-                st.rerun()
+                st.success("저장되었습니다."); st.rerun()
 
-            # Real-time quick summary
             income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
             expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
             remaining = max(income_sum - expense_sum, 0.0)
             etc_val = float(finance.get("summary", {}).get("etc", 0.0))
             st.markdown("---")
-            c1, c2, c3, c4 = st.columns(4)
+            c1,c2,c3,c4 = st.columns(4)
             c1.metric("Income", f"${income_sum:,.2f}")
             c2.metric("Expense", f"${expense_sum:,.2f}")
             c3.metric("Remaining", f"${remaining:,.2f}")
@@ -623,33 +532,26 @@ with TAB4:
     else:
         finance = load_client_finance(sel_id)
 
-        # Sidebar controls (optional)
         st.sidebar.markdown("### 그래프 설정")
-        pie_size = st.sidebar.slider("파이 크기 (inches)", min_value=4, max_value=12, value=6)
-        title_fs = st.sidebar.slider("제목 글씨 크기", min_value=12, max_value=32, value=18)
-        pct_fs = st.sidebar.slider("퍼센트 글씨 크기", min_value=8, max_value=18, value=12)
-        pct_dist = st.sidebar.slider("퍼센트 위치 (중심→가장자리)", min_value=0.4, max_value=1.2, value=0.7)
+        pie_size = st.sidebar.slider("파이 크기 (inches)", 4, 12, 6)
+        title_fs = st.sidebar.slider("제목 글씨 크기", 12, 32, 18)
+        pct_fs   = st.sidebar.slider("퍼센트 글씨 크기", 8, 18, 12)
+        pct_dist = st.sidebar.slider("퍼센트 위치 (중심→가장자리)", 0.4, 1.2, 0.7)
 
         def draw_pie(values: list[float], labels_for_legend: list[str], title: str):
-            # Filter out zero values to reduce clutter
-            vals, leg = zip(*[(v, l) for v, l in zip(values, labels_for_legend) if v > 0]) if any(values) else ([], [])
+            vals, leg = zip(*[(v,l) for v,l in zip(values, labels_for_legend) if v > 0]) if any(values) else ([],[])
             fig, ax = plt.subplots(figsize=(pie_size, pie_size))
             if sum(vals) > 0:
                 wedges, texts, autotexts = ax.pie(
-                    vals,
-                    labels=None,  # no labels on slices
+                    vals, labels=None,
                     autopct=lambda p: f"{p:.1f}%" if p > 0 else "",
-                    pctdistance=pct_dist,
-                    startangle=90,
+                    pctdistance=pct_dist, startangle=90,
                 )
-                # Set percent font size
                 plt.setp(autotexts, size=pct_fs)
-                ax.axis('equal')
-                ax.set_title(title, fontsize=title_fs)
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.pyplot(fig, use_container_width=True)
-                with col2:
+                ax.axis("equal"); ax.set_title(title, fontsize=title_fs)
+                c1,c2 = st.columns([2,1])
+                with c1: st.pyplot(fig, use_container_width=True)
+                with c2:
                     st.markdown("**범례**")
                     for l, v in sorted(zip(leg, vals), key=lambda x: x[1], reverse=True):
                         st.write(f"• {l}: ${v:,.2f}")
@@ -657,38 +559,29 @@ with TAB4:
                 ax.set_title(title, fontsize=title_fs)
                 st.pyplot(fig, use_container_width=True)
 
-        # 1) INCOME / EXPENSE pie: [Income, Expense, Remaining, Etc]
         income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
         expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
         remaining = max(income_sum - expense_sum, 0.0)
         etc_val = float(finance.get("summary", {}).get("etc", 0.0))
-        mix_vals = [income_sum, expense_sum, remaining, etc_val]
-        mix_labels = ["Income", "Expense", "Remaining", "Etc"]
-        draw_pie(mix_vals, mix_labels, "Income / Expense Mix")
+        draw_pie([income_sum, expense_sum, remaining, etc_val], ["Income","Expense","Remaining","Etc"], "Income / Expense Mix")
 
         st.markdown("---")
-
-        # 2) ASSET by category
         assets = finance.get("assets", [])
         if assets:
-            df_assets = pd.DataFrame(assets)
-            grouped = df_assets.groupby("category", dropna=False)["amount"].sum().reset_index()
-            draw_pie(grouped["amount"].tolist(), grouped["category"].astype(str).tolist(), "Assets by Category")
+            df = pd.DataFrame(assets); g = df.groupby("category", dropna=False)["amount"].sum().reset_index()
+            draw_pie(g["amount"].tolist(), g["category"].astype(str).tolist(), "Assets by Category")
         else:
             st.info("자산 항목이 없습니다.")
 
         st.markdown("---")
-
-        # 3) LIABILITY by category
         liabs = finance.get("liabilities", [])
         if liabs:
-            df_liabs = pd.DataFrame(liabs)
-            grouped = df_liabs.groupby("category", dropna=False)["amount"].sum().reset_index()
-            draw_pie(grouped["amount"].tolist(), grouped["category"].astype(str).tolist(), "Liabilities by Category")
+            df = pd.DataFrame(liabs); g = df.groupby("category", dropna=False)["amount"].sum().reset_index()
+            draw_pie(g["amount"].tolist(), g["category"].astype(str).tolist(), "Liabilities by Category")
         else:
             st.info("부채 항목이 없습니다.")
 
 # =====================
-# Footer note
+# Footer
 # =====================
 st.caption("Demo storage: JSON files (clients.json, data/client_{id}.json). Future: SQLite.")
