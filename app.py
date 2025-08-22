@@ -154,7 +154,6 @@ def delete_client_and_data(client_id: str) -> None:
 if "selected_client_id" not in st.session_state:
     st.session_state.selected_client_id = None
 
-# For detecting selection changes and refreshing edit fields
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
 
@@ -291,7 +290,7 @@ with TAB2:
     clients = load_clients()
 
     if clients:
-        # Build display table
+        # Build display table base rows
         table_rows = []
         for c in clients:
             table_rows.append({
@@ -301,12 +300,38 @@ with TAB2:
                 "phone": c.get("phone",""),
                 "home_address": c.get("home_address",""),
             })
-        df = pd.DataFrame(table_rows)
+
+        # --- Search ---
+        search_q = st.text_input("검색 (name / email / phone / address)", key="client_search", placeholder="e.g., chris, 224-829, deerfield, gmail")
+        def normalize_phone(p):
+            return re.sub(r"\D", "", p or "")
+        if search_q:
+            terms = [t.strip().lower() for t in search_q.split() if t.strip()]
+            def match_row(r):
+                hay = " ".join([
+                    r.get("name",""), r.get("email",""), r.get("phone",""), r.get("home_address","")
+                ]).lower()
+                digits = normalize_phone(r.get("phone",""))
+                # term may be alphabet or digits
+                def term_ok(t):
+                    if re.sub(r"\D", "", t):
+                        return re.sub(r"\D", "", t) in digits or t in hay
+                    return t in hay
+                return all(term_ok(t) for t in terms)
+            filtered = [r for r in table_rows if match_row(r)]
+        else:
+            filtered = table_rows
+
+        if not filtered:
+            st.warning("검색 결과가 없습니다.")
+
+        # Show filtered table
+        df = pd.DataFrame(filtered)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Selection box
-        opt_labels = [f"{r['name']} ({r['email']})" for r in table_rows]
-        opt_ids = [r['id'] for r in table_rows]
+        # Selection box from filtered
+        opt_labels = [f"{r['name']} ({r['email']})" for r in filtered]
+        opt_ids = [r['id'] for r in filtered]
 
         # Determine current index based on session selection
         try:
@@ -320,6 +345,20 @@ with TAB2:
             st.session_state.selected_client_id = sel_id
             st.session_state._edit_loaded_id = None  # force reload edit fields
             st.rerun()
+
+        # Profile preview card
+        if st.session_state.selected_client_id:
+            client = get_client(load_clients(), st.session_state.selected_client_id)
+            if client:
+                st.markdown("---")
+                pc1, pc2 = st.columns([2,2])
+                with pc1:
+                    st.markdown(f"**{client.get('first','')} {client.get('last','')}**")
+                    st.write(client.get("email",""))
+                    st.write(client.get("phone",""))
+                with pc2:
+                    st.write(client.get("home_address",""))
+                    st.caption(client.get("notes",""))
 
         # Edit / Delete panel
         if st.session_state.selected_client_id:
