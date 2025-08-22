@@ -1,4 +1,4 @@
-import streamlit as st
+\import streamlit as st
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -149,13 +149,16 @@ def delete_client_and_data(client_id: str) -> None:
 
 
 # =====================
-# Session defaults
+# Session defaults & helpers
 # =====================
 if "selected_client_id" not in st.session_state:
     st.session_state.selected_client_id = None
 
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
+
+if "_prev_selected_client_id" not in st.session_state:
+    st.session_state._prev_selected_client_id = None
 
 # Initialize registration session fields
 for k in [
@@ -167,6 +170,22 @@ for k in [
 
 # Keep phone fields formatted on every rerun (no on_change)
 st.session_state.reg_phone = format_phone(st.session_state.reg_phone)
+
+
+def clear_transient_inputs(client_id: str | None):
+    if not client_id:
+        return
+    # Remove any widget values namespaced with this client_id
+    suffix = f"_{client_id}"
+    for key in list(st.session_state.keys()):
+        if key.endswith(suffix) and (
+            key.startswith("income_details_") or
+            key.startswith("expense_details_") or
+            key.startswith("assets_") or
+            key.startswith("liabilities_") or
+            key.startswith("summary_etc_")
+        ):
+            st.session_state.pop(key, None)
 
 
 # =====================
@@ -350,6 +369,9 @@ with TAB2:
         sel_label = st.selectbox("클라이언트 선택", options=opt_labels, index=cur_idx if opt_labels else 0)
         sel_id = opt_ids[opt_labels.index(sel_label)] if opt_labels else None
         if sel_id != st.session_state.selected_client_id:
+            # clear transient inputs for previous client
+            clear_transient_inputs(st.session_state.selected_client_id)
+            st.session_state._prev_selected_client_id = st.session_state.selected_client_id
             st.session_state.selected_client_id = sel_id
             st.session_state._edit_loaded_id = None  # force reload edit fields
             st.rerun()
@@ -507,23 +529,23 @@ with TAB3:
             else:
                 st.caption("(아직 항목이 없습니다)")
 
-            # Add new
-            with st.form(f"add_{section_key}"):
+            # Add new (keys namespaced by client id)
+            with st.form(f"add_{section_key}", clear_on_submit=True):
                 inputs = {}
                 if section_key in ("income_details", "expense_details"):
                     c1, c2, c3 = st.columns([1, 2, 1])
                     with c1:
-                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category")
+                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
                     with c2:
-                        inputs["desc"] = st.text_input("Description", key=f"{section_key}_desc")
+                        inputs["desc"] = st.text_input("Description", key=f"{section_key}_desc_{sel_id}")
                     with c3:
-                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount")
+                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
                 else:
                     c1, c2 = st.columns([2, 1])
                     with c1:
-                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category")
+                        inputs["category"] = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
                     with c2:
-                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount")
+                        inputs["amount"] = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
 
                 add_btn = st.form_submit_button("추가")
                 if add_btn:
@@ -548,6 +570,13 @@ with TAB3:
                             rec["desc"] = (inputs.get("desc") or "").strip()
                         finance[section_key].append(rec)
                         save_client_finance(sel_id, finance)
+                        # Explicitly clear transient widget keys for this client
+                        for k in [
+                            f"{section_key}_category_{sel_id}",
+                            f"{section_key}_desc_{sel_id}",
+                            f"{section_key}_amount_{sel_id}",
+                        ]:
+                            st.session_state.pop(k, None)
                         st.success("추가되었습니다.")
                         st.rerun()
 
@@ -564,10 +593,13 @@ with TAB3:
         with subtabs[4]:
             st.markdown("**Etc 설정**")
             etc_val = float(finance.get("summary", {}).get("etc", 0.0))
-            new_etc = st.number_input("Etc", min_value=0.0, value=float(etc_val), step=100.0, key="summary_etc")
+            etc_key = f"summary_etc_{sel_id}"
+            new_etc = st.number_input("Etc", min_value=0.0, value=float(etc_val), step=100.0, key=etc_key)
             if st.button("Etc 저장"):
                 finance.setdefault("summary", {})["etc"] = float(new_etc)
                 save_client_finance(sel_id, finance)
+                # Clear transient etc key for this client to avoid carry-over
+                st.session_state.pop(etc_key, None)
                 st.success("저장되었습니다.")
                 st.rerun()
 
