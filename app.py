@@ -107,10 +107,9 @@ def load_client_finance(client_id: str) -> dict:
         return data
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        # schema guard
         base = _empty_finance()
         for k in base:
-            raw.setdefault(k, base[k] if k != "summary" else {"etc": 0.0})
+            raw.setdefault(k, base[k])
         raw["summary"].setdefault("etc", 0.0)
         return raw
     except Exception:
@@ -139,7 +138,6 @@ if "selected_client_id" not in st.session_state:
 if "_edit_loaded_id" not in st.session_state:
     st.session_state._edit_loaded_id = None
 
-# registration form state
 for k in [
     "reg_first","reg_last","reg_email","reg_phone",
     "reg_street","reg_apt","reg_city","reg_state","reg_zip",
@@ -155,12 +153,11 @@ def clear_transient_inputs(client_id: str | None):
     suffix = f"_{client_id}"
     for key in list(st.session_state.keys()):
         if key.endswith(suffix) and (
-            key.startswith("income_details_")
-            or key.startswith("expense_details_")
-            or key.startswith("assets_")
-            or key.startswith("liabilities_")
+            key.startswith("income_editor_")
+            or key.startswith("expense_editor_")
+            or key.startswith("assets_editor_")
+            or key.startswith("liabilities_editor_")
             or key.startswith("summary_etc_")
-            or key.startswith("editrow_")
         ):
             st.session_state.pop(key, None)
 
@@ -391,7 +388,7 @@ with TAB2:
     else:
         st.info("등록된 클라이언트가 없습니다. ‘신규 등록’ 탭에서 먼저 등록하세요.")
 
-# -------- TAB 3: 재무 입력 (CRUD) --------
+# -------- TAB 3: 재무 입력 (표 직접 편집) --------
 with TAB3:
     st.subheader("2) 재무 입력 (클라이언트별 저장)")
     sel_id = st.session_state.selected_client_id
@@ -400,135 +397,105 @@ with TAB3:
     else:
         finance = load_client_finance(sel_id)
 
-        def label_for(section_key: str, item: dict, idx: int) -> str:
-            if section_key in ("income_details","expense_details"):
-                return f"[{idx}] {item.get('category','')} / {item.get('desc','')} / ${item.get('amount',0):,.2f}"
-            else:
-                return f"[{idx}] {item.get('category','')} / ${item.get('amount',0):,.2f}"
+        def editor_section(title: str, section_key: str, has_desc: bool, key_prefix: str):
+            st.markdown(f"### {title}")
 
-        def render_section(section_key: str, has_desc: bool, title: str):
-            st.markdown(f"#### {title}")
-            items = finance.get(section_key, [])
-            cols = ["category","desc","amount"] if has_desc else ["category","amount"]
-            if items:
-                st.dataframe(pd.DataFrame(items)[cols], use_container_width=True, hide_index=True)
+            # 현재 데이터프레임
+            rows = finance.get(section_key, [])
+            if has_desc:
+                df = pd.DataFrame(rows, columns=["category", "desc", "amount"])
             else:
-                st.caption("(아직 항목이 없습니다)")
+                df = pd.DataFrame(rows, columns=["category", "amount"])
 
-            # ---- Add
-            with st.form(f"add_{section_key}", clear_on_submit=True):
-                if has_desc:
-                    c1,c2,c3 = st.columns([1,2,1])
-                    with c1: new_cat  = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
-                    with c2: new_desc = st.text_input("Description", key=f"{section_key}_desc_{sel_id}")
-                    with c3: new_amt  = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
-                else:
-                    c1,c2 = st.columns([2,1])
-                    with c1: new_cat = st.text_input("Category", key=f"{section_key}_category_{sel_id}")
-                    with c2: new_amt = st.number_input("Amount", min_value=0.0, step=100.0, key=f"{section_key}_amount_{sel_id}")
-                    new_desc = ""
-                if st.form_submit_button("추가"):
-                    errs=[]
-                    if not (new_cat or "").strip(): errs.append("Category를 입력하세요.")
+            # 컬럼 설정
+            col_cfg = {
+                "category": st.column_config.TextColumn("Category", required=True, help="필수"),
+                "amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=100.0, format="%.2f"),
+            }
+            if has_desc:
+                col_cfg["desc"] = st.column_config.TextColumn("Description", required=False)
+
+            # data_editor (직접 편집/행 추가/삭제)
+            edited = st.data_editor(
+                df,
+                key=f"{key_prefix}_editor_{sel_id}",
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                column_config=col_cfg,
+            )
+
+            # 저장 버튼
+            if st.button("변경 사항 저장", key=f"{key_prefix}_save_{sel_id}"):
+                # 검증 & 정리
+                errs = []
+                clean_rows = []
+
+                # edited 가 Series로 들어오는 케이스 방지
+                if isinstance(edited, pd.Series):
+                    edited = edited.to_frame().T
+
+                for i, r in (edited.fillna({"category": "", "desc": ""}) if has_desc else edited.fillna({"category": ""})).iterrows():
+                    cat = str(r.get("category", "")).strip()
+                    amt = r.get("amount", 0)
+                    if cat == "":
+                        # 빈 행은 무시(완전 공행 또는 카테고리 없는 행)
+                        continue
                     try:
-                        if float(new_amt) < 0: errs.append("Amount는 0 이상이어야 합니다.")
+                        amt = float(amt)
+                        if amt < 0:
+                            errs.append(f"{title} 행 {i+1}: Amount는 0 이상이어야 합니다.")
                     except Exception:
-                        errs.append("Amount가 올바르지 않습니다.")
-                    if errs:
-                        st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
-                    else:
-                        rec = {"category": new_cat.strip(), "amount": float(new_amt)}
-                        if has_desc: rec["desc"] = (new_desc or "").strip()
-                        finance[section_key].append(rec); save_client_finance(sel_id, finance)
-                        for k in [f"{section_key}_category_{sel_id}", f"{section_key}_desc_{sel_id}", f"{section_key}_amount_{sel_id}"]:
-                            st.session_state.pop(k, None)
-                        st.success("추가되었습니다."); st.rerun()
+                        errs.append(f"{title} 행 {i+1}: Amount가 올바르지 않습니다.")
+                        continue
 
-            # ---- Edit/Delete panel (always visible when items exist)
-            st.markdown("**행 편집/삭제**")
-            if not items:
-                st.caption("편집/삭제할 항목이 없습니다.")
-            else:
-                options = [label_for(section_key, it, i) for i,it in enumerate(items)]
-                sel_row_label = st.selectbox("항목 선택", options=options, key=f"editrow_select_{section_key}_{sel_id}")
-                row_idx = options.index(sel_row_label)
-
-                with st.form(f"edit_{section_key}", clear_on_submit=True):
+                    row = {"category": cat, "amount": amt}
                     if has_desc:
-                        c1,c2,c3 = st.columns([1,2,1])
-                        with c1: e_cat = st.text_input("Category", value=items[row_idx].get("category",""))
-                        with c2: e_desc = st.text_input("Description", value=items[row_idx].get("desc",""))
-                        with c3: e_amt = st.number_input("Amount", min_value=0.0, value=float(items[row_idx].get("amount",0.0)), step=100.0)
-                    else:
-                        c1,c2 = st.columns([2,1])
-                        with c1: e_cat = st.text_input("Category", value=items[row_idx].get("category",""))
-                        with c2: e_amt = st.number_input("Amount", min_value=0.0, value=float(items[row_idx].get("amount",0.0)), step=100.0)
-                        e_desc = ""
-                    c_a, c_b, c_c = st.columns([1,1,1])
-                    with c_a: edit_ok = st.form_submit_button("수정 저장")
-                    with c_b: del_ok  = st.form_submit_button("이 항목 삭제")
-                    with c_c:
-                        st.markdown("&nbsp;")
-                        clear_all = st.checkbox("전체 삭제 확인")
-                        if st.form_submit_button("섹션 전체 삭제"):
-                            if clear_all:
-                                finance[section_key] = []
-                                save_client_finance(sel_id, finance)
-                                st.success("해당 섹션을 모두 삭제했습니다."); st.rerun()
-                            else:
-                                st.warning("‘전체 삭제 확인’ 체크 후 다시 눌러주세요.")
+                        row["desc"] = str(r.get("desc", "")).strip()
+                    clean_rows.append(row)
 
-                    if edit_ok:
-                        errs=[]
-                        if not e_cat.strip(): errs.append("Category를 입력하세요.")
-                        try:
-                            if float(e_amt) < 0: errs.append("Amount는 0 이상이어야 합니다.")
-                        except Exception:
-                            errs.append("Amount가 올바르지 않습니다.")
-                        if errs:
-                            st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>"+ "<br>".join([f"• {e}" for e in errs]) +"</div>", unsafe_allow_html=True)
-                        else:
-                            items[row_idx]["category"] = e_cat.strip()
-                            items[row_idx]["amount"]   = float(e_amt)
-                            if has_desc: items[row_idx]["desc"] = (e_desc or "").strip()
-                            save_client_finance(sel_id, finance)
-                            st.success("수정되었습니다."); st.rerun()
+                if errs:
+                    st.markdown("<div style='color:#c1121f;font-size:0.9rem;'>" + "<br>".join([f"• {e}" for e in errs]) + "</div>", unsafe_allow_html=True)
+                else:
+                    finance[section_key] = clean_rows
+                    save_client_finance(sel_id, finance)
+                    st.success("저장되었습니다.")
+                    st.rerun()
 
-                    if del_ok:
-                        items.pop(row_idx); save_client_finance(sel_id, finance)
-                        st.success("삭제되었습니다."); st.rerun()
-
-        inc, exp, ast, lia, summ = st.tabs(["Income","Expense","Assets","Liabilities","Summary"])
-        with inc:  render_section("income_details",  has_desc=True,  title="Income")
-        with exp:  render_section("expense_details", has_desc=True,  title="Expense")
-        with ast:  render_section("assets",          has_desc=False, title="Assets")
-        with lia:  render_section("liabilities",     has_desc=False, title="Liabilities")
-        with summ:
-            st.markdown("**Etc 설정**")
-            etc_val = float(finance.get("summary", {}).get("etc", 0.0))
-            etc_key = f"summary_etc_{sel_id}"
-            new_etc = st.number_input("Etc", min_value=0.0, value=float(etc_val), step=100.0, key=etc_key)
-            if st.button("Etc 저장"):
-                finance.setdefault("summary", {})["etc"] = float(new_etc)
-                save_client_finance(sel_id, finance)
-                st.session_state.pop(etc_key, None)
-                st.success("저장되었습니다."); st.rerun()
-
-            # Quick summary
-            income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
-            expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
-            remaining = max(income_sum - expense_sum, 0.0)
-            etc_val = float(finance.get("summary", {}).get("etc", 0.0))
             st.markdown("---")
-            c1,c2,c3,c4 = st.columns(4)
-            c1.metric("Income", f"${income_sum:,.2f}")
-            c2.metric("Expense", f"${expense_sum:,.2f}")
-            c3.metric("Remaining", f"${remaining:,.2f}")
-            c4.metric("Etc", f"${etc_val:,.2f}")
+
+        # 섹션별 에디터
+        editor_section("Income", "income_details", has_desc=True,  key_prefix="income")
+        editor_section("Expense", "expense_details", has_desc=True, key_prefix="expense")
+        editor_section("Assets",  "assets",          has_desc=False, key_prefix="assets")
+        editor_section("Liabilities", "liabilities", has_desc=False, key_prefix="liabilities")
+
+        # Summary (Etc)
+        st.markdown("### Summary")
+        etc_val = float(finance.get("summary", {}).get("etc", 0.0))
+        etc_key = f"summary_etc_{sel_id}"
+        new_etc = st.number_input("Etc", min_value=0.0, value=float(etc_val), step=100.0, key=etc_key)
+        if st.button("Etc 저장"):
+            finance.setdefault("summary", {})["etc"] = float(new_etc)
+            save_client_finance(sel_id, finance)
+            st.session_state.pop(etc_key, None)
+            st.success("저장되었습니다.")
+            st.rerun()
+
+        # Quick summary
+        income_sum = float(sum(x.get("amount", 0.0) for x in finance.get("income_details", [])))
+        expense_sum = float(sum(x.get("amount", 0.0) for x in finance.get("expense_details", [])))
+        remaining = max(income_sum - expense_sum, 0.0)
+        etc_val = float(finance.get("summary", {}).get("etc", 0.0))
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Income", f"${income_sum:,.2f}")
+        c2.metric("Expense", f"${expense_sum:,.2f}")
+        c3.metric("Remaining", f"${remaining:,.2f}")
+        c4.metric("Etc", f"${etc_val:,.2f}")
 
 # -------- TAB 4: 시각화 --------
 with TAB4:
-    st.subheader("3) 시각화 (파이 그래프)")
+    st.subheader("4) 시각화 (파이 그래프)")
     sel_id = st.session_state.selected_client_id
     if not sel_id:
         st.info("클라이언트를 먼저 선택하세요 (리스트/선택 탭).")
@@ -555,7 +522,7 @@ with TAB4:
                 c1,c2 = st.columns([2,1])
                 with c1: st.pyplot(fig, use_container_width=True)
                 with c2:
-                    st.markdown("**範例/범례**" if False else "**범례**")
+                    st.markdown("**범례**")
                     for l, v in sorted(zip(leg, vals), key=lambda x: x[1], reverse=True):
                         st.write(f"• {l}: ${v:,.2f}")
             else:
