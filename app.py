@@ -378,8 +378,10 @@ with TAB2:
                     st.session_state.edit_notes = client.get("notes", "")
                     st.session_state._edit_loaded_id = client["id"]
 
-                # Keep phone formatted each render
-                st.session_state.edit_phone = format_phone(st.session_state.edit_phone)
+                # Keep phone formatted each render (safe even if key not initialized)
+phone_cur = st.session_state.get("edit_phone", None)
+if phone_cur is not None:
+    st.session_state.edit_phone = format_phone(phone_cur)
 
                 st.markdown("---")
                 st.markdown("### 프로필 수정")
